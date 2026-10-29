@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blood Bank Management System (BBMS) | SWE Lab Project</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🩸</text></svg>">
+</head>
+<body>
+
+  <!-- Top Bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon">🩸</div>
+      <div class="brand-text">
+        <h1>Blood Bank Management System</h1>
+        <div class="subtext">SWE Project • SRN: PES2UG24CS292 • SRS v1.1 Verified</div>
+      </div>
+    </div>
+
+    <div class="topbar-controls">
+      <!-- Quick Demo Role Switcher -->
+      <div class="role-switcher">
+        <button class="role-btn active" data-role="admin">Admin</button>
+        <button class="role-btn" data-role="staff">Staff</button>
+        <button class="role-btn" data-role="hospital">Hospital</button>
+        <button class="role-btn" data-role="donor">Donor</button>
+      </div>
+
+      <span id="currentUserDisplay" style="font-size: 0.8rem; font-weight: 600; color: #cbd5e1;">Admin (ADMIN)</span>
+
+      <!-- Notification Bell -->
+      <button class="notif-badge-btn" onclick="toggleNotifDrawer()" title="Alerts & Notifications">
+        🔔
+        <span class="notif-count" id="notifCount">0</span>
+      </button>
+
+      <button class="btn btn-sm btn-outline" style="border-color:#475569; color:#f8fafc;" onclick="resetDemoDatabase()" title="Reset Seed Data">
+        🔄 Reset Demo
+      </button>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="nav-tabs">
+    <button class="tab-btn active" data-tab="dashboard">📊 Dashboard</button>
+    <button class="tab-btn" data-tab="inventory">📦 Inventory & Expiry</button>
+    <button class="tab-btn" data-tab="donors">👤 Donors & Screening</button>
+    <button class="tab-btn" data-tab="collections">🩸 Blood Collection</button>
+    <button class="tab-btn" data-tab="requests">📋 Blood Requests</button>
+    <button class="tab-btn" data-tab="issues">🚚 Issues & Dispatch</button>
+    <button class="tab-btn" data-tab="reports">📈 Reports & CSV</button>
+    <button class="tab-btn" data-tab="admin">🛡️ Admin & Audit</button>
+  </nav>
+
+  <!-- Main Container -->
+  <main class="container">
+
+    <!-- 1. DASHBOARD TAB -->
+    <section id="tab-dashboard" class="tab-content active">
+      <div class="kpi-grid">
+        <div class="kpi-card green">
+          <div class="kpi-title">Available Units</div>
+          <div class="kpi-val" id="kpiAvailableUnits">0</div>
+          <div class="kpi-desc">Verified unreserved inventory</div>
+        </div>
+        <div class="kpi-card amber">
+          <div class="kpi-title">Quarantined / Hold</div>
+          <div class="kpi-val" id="kpiQuarantinedUnits">0</div>
+          <div class="kpi-desc">Under laboratory review</div>
+        </div>
+        <div class="kpi-card red">
+          <div class="kpi-title">Expired Units</div>
+          <div class="kpi-val" id="kpiExpiredUnits">0</div>
+          <div class="kpi-desc">Automatically blocked</div>
+        </div>
+        <div class="kpi-card blue">
+          <div class="kpi-title">Issued Units</div>
+          <div class="kpi-val" id="kpiIssuedUnits">0</div>
+          <div class="kpi-desc">Dispatched to hospitals</div>
+        </div>
+        <div class="kpi-card purple">
+          <div class="kpi-title">Total Registered</div>
+          <div class="kpi-val" id="kpiTotalUnits">0</div>
+          <div class="kpi-desc">Lifetime unit entries</div>
+        </div>
+      </div>
+
+      <!-- Real-Time Blood Stock Matrix -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🩸 Available Blood Group Stock Levels</div>
+          <button class="btn btn-sm btn-outline" onclick="loadDashboard()">Refresh</button>
+        </div>
+        <div class="matrix-grid" id="dashboardStockMatrix"></div>
+      </div>
+
+      <!-- Urgent / Recent Blood Requests -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🚨 Recent Blood Requests</div>
+          <button class="btn btn-sm btn-primary" onclick="openNewRequestModal()">+ Create Request</button>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Request ID</th>
+                <th>Hospital</th>
+                <th>Blood Group</th>
+                <th>Component</th>
+                <th>Urgency</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="dashboardRecentRequests"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. INVENTORY TAB -->
+    <section id="tab-inventory" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📦 Blood Unit Inventory & Shelf-Life Management</div>
+          <div style="display:flex; gap:0.5rem;">
+            <button class="btn btn-sm btn-primary" onclick="triggerExpiryCheck()">⚡ Scan Expiry Dates</button>
+          </div>
+        </div>
+
+        <div class="filter-bar">
+          <input type="text" id="invSearch" class="filter-input" placeholder="Search by Unit ID, Donor ID, or Storage..." oninput="loadInventory()">
+          <select id="invFilterGroup" class="filter-select" onchange="loadInventory()">
+            <option value="">All Blood Groups</option>
+            <option value="A+">A+</option><option value="A-">A-</option>
+            <option value="B+">B+</option><option value="B-">B-</option>
+            <option value="AB+">AB+</option><option value="AB-">AB-</option>
+            <option value="O+">O+</option><option value="O-">O-</option>
+          </select>
+          <select id="invFilterComp" class="filter-select" onchange="loadInventory()">
+            <option value="">All Components</option>
+            <option value="Whole Blood">Whole Blood (35d)</option>
+            <option value="Packed Red Cells">Packed Red Cells (42d)</option>
+            <option value="Platelets">Platelets (5d)</option>
+            <option value="Fresh Frozen Plasma">Fresh Frozen Plasma (365d)</option>
+            <option value="Cryoprecipitate">Cryoprecipitate (365d)</option>
+          </select>
+          <select id="invFilterStatus" class="filter-select" onchange="loadInventory()">
+            <option value="">All Statuses</option>
+            <option value="Available">Available</option>
+            <option value="Reserved">Reserved</option>
+            <option value="Quarantined">Quarantined</option>
+            <option value="Expired">Expired</option>
+            <option value="Issued">Issued</option>
+            <option value="Discarded">Discarded</option>
+          </select>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Unit ID</th>
+                <th>Group</th>
+                <th>Component</th>
+                <th>Volume</th>
+                <th>Collected</th>
+                <th>Expiry / Shelf-Life</th>
+                <th>Status</th>
+                <th>Storage</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="inventoryTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. DONORS TAB -->
+    <section id="tab-donors" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">👤 Donor Directory & Medical Eligibility Screening</div>
+          <button class="btn btn-sm btn-primary" onclick="openRegisterDonorModal()">+ Register Donor</button>
+        </div>
+
+        <div class="filter-bar">
+          <input type="text" id="donorSearch" class="filter-input" placeholder="Search by donor name, ID, phone..." oninput="loadDonors()">
+          <select id="donorFilterGroup" class="filter-select" onchange="loadDonors()">
+            <option value="">All Blood Groups</option>
+            <option value="A+">A+</option><option value="A-">A-</option>
+            <option value="B+">B+</option><option value="B-">B-</option>
+            <option value="AB+">AB+</option><option value="AB-">AB-</option>
+            <option value="O+">O+</option><option value="O-">O-</option>
+          </select>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Donor ID</th>
+                <th>Full Name</th>
+                <th>Age / Gender</th>
+                <th>Blood Group</th>
+                <th>Phone</th>
+                <th>Donations</th>
+                <th>Last Donation</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="donorsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4. BLOOD COLLECTION TAB -->
+    <section id="tab-collections" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🩸 Record New Blood Collection</div>
+        </div>
+        <p style="color:#64748b; font-size:0.88rem; margin-bottom:1.5rem;">
+          Collection registration enforces automated clinical eligibility verification. Only donors with a passing medical screening can proceed to unit creation.
+        </p>
+
+        <div class="form-grid" style="max-width: 700px;">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Select Registered Donor *</label>
+            <select id="collDonorSelect" class="form-control"></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Blood Group *</label>
+            <select id="collBloodGroup" class="form-control">
+              <option value="O+">O+</option><option value="O-">O-</option>
+              <option value="A+">A+</option><option value="A-">A-</option>
+              <option value="B+">B+</option><option value="B-">B-</option>
+              <option value="AB+">AB+</option><option value="AB-">AB-</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Component Separated *</label>
+            <select id="collComponent" class="form-control">
+              <option value="Whole Blood">Whole Blood (Shelf life: 35 days)</option>
+              <option value="Packed Red Cells">Packed Red Cells (Shelf life: 42 days)</option>
+              <option value="Platelets">Platelets (Shelf life: 5 days)</option>
+              <option value="Fresh Frozen Plasma">Fresh Frozen Plasma (Shelf life: 365 days)</option>
+              <option value="Cryoprecipitate">Cryoprecipitate (Shelf life: 365 days)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Volume Collected (mL) *</label>
+            <input type="number" id="collVolume" class="form-control" value="450.0" min="100" max="600">
+          </div>
+        </div>
+
+        <div style="margin-top: 1.5rem;">
+          <button class="btn btn-primary" onclick="submitCollection()">Confirm Collection & Create Unit</button>
+        </div>
+
+        <div id="collResultBox" style="display:none; margin-top:1.5rem; padding:1rem; background:#dcfce7; border:1px solid #86efac; border-radius:6px;">
+          <h4 style="color:#16a34a; margin-bottom:0.5rem;">✅ Collection Successful & Unit Created!</h4>
+          <div id="collResultDetails" style="font-size:0.9rem; color:#1e293b;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. REQUESTS TAB -->
+    <section id="tab-requests" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📋 Hospital Blood Requests & FEFO Allocation</div>
+          <button class="btn btn-sm btn-primary" onclick="openNewRequestModal()">+ Submit Request</button>
+        </div>
+
+        <div class="filter-bar">
+          <input type="text" id="reqSearch" class="filter-input" placeholder="Search by request ID, patient, hospital..." oninput="loadRequests()">
+          <select id="reqFilterStatus" class="filter-select" onchange="loadRequests()">
+            <option value="">All Statuses</option>
+            <option value="Pending">Pending</option>
+            <option value="Approved">Approved</option>
+            <option value="On_Hold">On Hold</option>
+            <option value="Fulfilled">Fulfilled</option>
+            <option value="Rejected">Rejected</option>
+          </select>
+          <select id="reqFilterUrgency" class="filter-select" onchange="loadRequests()">
+            <option value="">All Priorities</option>
+            <option value="Emergency">Emergency (Highest)</option>
+            <option value="Urgent">Urgent</option>
+            <option value="Normal">Normal</option>
+          </select>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Request ID</th>
+                <th>Hospital / Requester</th>
+                <th>Patient</th>
+                <th>Group</th>
+                <th>Component</th>
+                <th>Qty</th>
+                <th>Urgency</th>
+                <th>Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="requestsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6. ISSUES & DISPATCH TAB -->
+    <section id="tab-issues" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🚚 Issued Blood Units & Traceability Slips</div>
+        </div>
+
+        <div class="filter-bar">
+          <input type="text" id="issueSearch" class="filter-input" placeholder="Search by Issue ID, Unit ID, Patient..." oninput="loadIssues()">
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Issue ID</th>
+                <th>Request Ref</th>
+                <th>Unit Issued</th>
+                <th>Hospital / Recipient</th>
+                <th>Blood Product</th>
+                <th>Issue Timestamp</th>
+                <th>Certificate</th>
+              </tr>
+            </thead>
+            <tbody id="issuesTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7. REPORTS TAB -->
+    <section id="tab-reports" class="tab-content">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📈 System Reports & CSV Analytics</div>
+          <div style="display:flex; gap:0.5rem;">
+            <button class="btn btn-sm btn-secondary" onclick="downloadCurrentReportCsv()">⬇️ Download CSV</button>
+          </div>
+        </div>
+
+        <div class="filter-bar">
+          <label class="form-label" style="margin-right:0.5rem; align-self:center;">Report Category:</label>
+          <select id="reportTypeSelect" class="filter-select" onchange="loadReportsView()">
+            <option value="inventory">Current Blood Inventory Breakdown</option>
+            <option value="donations">Donations & Collections Log</option>
+            <option value="issues">Issue & Dispatch Transactions</option>
+            <option value="discards_expiries">Expiries & Discards Log</option>
+          </select>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead id="reportTableHead"></thead>
+            <tbody id="reportTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8. ADMIN & AUDIT TAB -->
+    <section id="tab-admin" class="tab-content">
+      <!-- User Management -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🛡️ User Management & Role-Based Access Control</div>
+          <button class="btn btn-sm btn-primary" onclick="openCreateUserModal()">+ Add User</button>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>User ID</th>
+                <th>Username</th>
+                <th>Full Name</th>
+                <th>Email</th>
+                <th>Assigned Role</th>
+                <th>Account Status</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="adminUsersTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Audit Log Trail -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📜 Tamper-Evident Security & Audit Trail</div>
+          <button class="btn btn-sm btn-outline" onclick="loadAuditLogs()">Refresh Logs</button>
+        </div>
+        <div class="filter-bar">
+          <input type="text" id="auditFilterActor" class="filter-input" placeholder="Filter by actor username..." oninput="loadAuditLogs()">
+          <input type="text" id="auditFilterAction" class="filter-input" placeholder="Filter by action (e.g. LOGIN, ISSUE, ALLOCATE)..." oninput="loadAuditLogs()">
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Entity Target</th>
+                <th>Transaction Details</th>
+                <th>Client IP</th>
+              </tr>
+            </thead>
+            <tbody id="auditLogsTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ===================== MODALS ===================== -->
+
+  <!-- Register Donor Modal -->
+  <div class="modal-backdrop" id="registerDonorModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Register Blood Donor</h3>
+        <button class="modal-close" onclick="closeModal('registerDonorModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Full Name *</label>
+            <input type="text" id="newDonorName" class="form-control" placeholder="e.g. Ramesh Kumar">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Age (18-65) *</label>
+            <input type="number" id="newDonorAge" class="form-control" min="18" max="65" value="25">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Gender *</label>
+            <select id="newDonorGender" class="form-control">
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Blood Group *</label>
+            <select id="newDonorGroup" class="form-control">
+              <option value="O+">O+</option><option value="O-">O-</option>
+              <option value="A+">A+</option><option value="A-">A-</option>
+              <option value="B+">B+</option><option value="B-">B-</option>
+              <option value="AB+">AB+</option><option value="AB-">AB-</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Phone Number *</label>
+            <input type="text" id="newDonorPhone" class="form-control" placeholder="+91-9876543210">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Email Address</label>
+            <input type="email" id="newDonorEmail" class="form-control" placeholder="donor@example.com">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Residential Address</label>
+            <input type="text" id="newDonorAddress" class="form-control" placeholder="City, Area, Pincode">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('registerDonorModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitNewDonor()">Save Donor Record</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Medical Eligibility Screening Modal -->
+  <div class="modal-backdrop" id="eligibilityModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Donor Medical Eligibility Screening</h3>
+        <button class="modal-close" onclick="closeModal('eligibilityModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="eligModalDonorId">
+        <p style="font-weight:600; color:#1e3a8a; margin-bottom:1rem;" id="eligModalDonorName"></p>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Weight (kg) [Min: 50.0kg] *</label>
+            <input type="number" id="eligWeight" class="form-control" step="0.5" value="65.0">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Hemoglobin (g/dL) [Min: 12.5] *</label>
+            <input type="number" id="eligHemoglobin" class="form-control" step="0.1" value="14.0">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Systolic BP (100-140 mmHg) *</label>
+            <input type="number" id="eligSystolic" class="form-control" value="120">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Diastolic BP (60-90 mmHg) *</label>
+            <input type="number" id="eligDiastolic" class="form-control" value="80">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Pulse (60-100 bpm) *</label>
+            <input type="number" id="eligPulse" class="form-control" value="72">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Days Since Last Donation [Min: 90d] *</label>
+            <input type="number" id="eligDaysSince" class="form-control" value="95">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Medical Remarks / Exclusions (Optional)</label>
+            <input type="text" id="eligRemarks" class="form-control" placeholder="Fever, travel, medication, or leave empty if fit">
+          </div>
+        </div>
+
+        <div id="eligResultBox" style="display:none; margin-top:1rem;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('eligibilityModal')">Close</button>
+        <button class="btn btn-secondary" onclick="submitEligibilityCheck()">Evaluate & Record Screening</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Donor History Modal -->
+  <div class="modal-backdrop" id="donorHistoryModal">
+    <div class="modal-content" style="max-width:750px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="historyModalDonorTitle">Donation History</h3>
+        <button class="modal-close" onclick="closeModal('donorHistoryModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Collection ID</th>
+                <th>Date</th>
+                <th>Volume</th>
+                <th>Unit Ref</th>
+                <th>Component</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="donorHistoryTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('donorHistoryModal')">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Unit Status Modal (Quarantine / Discard) -->
+  <div class="modal-backdrop" id="unitStatusModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Change Blood Unit Status</h3>
+        <button class="modal-close" onclick="closeModal('unitStatusModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="statusModalUnitId">
+        <p style="margin-bottom:1rem;">Unit Target: <strong id="statusModalDisplayUnit"></strong></p>
+        <div class="form-group" style="margin-bottom:1rem;">
+          <label class="form-label">Target Status *</label>
+          <select id="statusModalTarget" class="form-control">
+            <option value="Available">Available (Release to Stock)</option>
+            <option value="Quarantined">Quarantined (Hold for Lab Testing)</option>
+            <option value="Discarded">Discarded (Decommission & Bio-Waste)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Mandatory Audit Reason *</label>
+          <textarea id="statusModalReason" class="form-control" rows="3" placeholder="Specify why the unit status is being altered (e.g. Serology screening positive, bag leakage, release verified)..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('unitStatusModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitUnitStatus()">Commit Status Change</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Blood Request Modal -->
+  <div class="modal-backdrop" id="newRequestModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Create Hospital Blood Request</h3>
+        <button class="modal-close" onclick="closeModal('newRequestModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Hospital Name *</label>
+            <input type="text" id="reqHospital" class="form-control" value="City Care Hospital">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Requesting Doctor *</label>
+            <input type="text" id="reqDoctor" class="form-control" value="Dr. S. Patil">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Patient Name *</label>
+            <input type="text" id="reqPatient" class="form-control" placeholder="Patient Full Name">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Patient Blood Group *</label>
+            <select id="reqGroup" class="form-control">
+              <option value="O+">O+</option><option value="O-">O-</option>
+              <option value="A+">A+</option><option value="A-">A-</option>
+              <option value="B+">B+</option><option value="B-">B-</option>
+              <option value="AB+">AB+</option><option value="AB-">AB-</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Component Type *</label>
+            <select id="reqComp" class="form-control">
+              <option value="Whole Blood">Whole Blood</option>
+              <option value="Packed Red Cells">Packed Red Cells</option>
+              <option value="Platelets">Platelets</option>
+              <option value="Fresh Frozen Plasma">Fresh Frozen Plasma</option>
+              <option value="Cryoprecipitate">Cryoprecipitate</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Units Needed (1-20) *</label>
+            <input type="number" id="reqQuantity" class="form-control" min="1" max="20" value="1">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Clinical Urgency *</label>
+            <select id="reqUrgency" class="form-control">
+              <option value="Normal">Normal (Routine procedure)</option>
+              <option value="Urgent">Urgent (Within 6 hours)</option>
+              <option value="Emergency">Emergency (Immediate OT requirement)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('newRequestModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitNewRequest()">Submit Blood Request</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Request Decision Modal -->
+  <div class="modal-backdrop" id="requestDecisionModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title" id="decisionModalTitle">Decide Blood Request</h3>
+        <button class="modal-close" onclick="closeModal('requestDecisionModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="decisionModalReqId">
+        <div class="form-group" style="margin-bottom:1rem;">
+          <label class="form-label">Decision Action *</label>
+          <select id="decisionChoice" class="form-control">
+            <option value="Approved">Approve Request</option>
+            <option value="On_Hold">Place On Hold</option>
+            <option value="Rejected">Reject Request</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Decision Reason & Notes *</label>
+          <textarea id="decisionReason" class="form-control" rows="3" placeholder="Enter clinical rationale or reason for decision..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('requestDecisionModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitRequestDecision()">Commit Decision</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- FEFO Allocation Modal -->
+  <div class="modal-backdrop" id="fefoAllocationModal">
+    <div class="modal-content" style="max-width:780px;">
+      <div class="modal-header">
+        <h3 class="modal-title" id="fefoModalTitle">FEFO Allocation Engine</h3>
+        <button class="modal-close" onclick="closeModal('fefoAllocationModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="fefoModalReqId">
+        <p style="color:#64748b; font-size:0.85rem; margin-bottom:1rem;">
+          The First-Expire, First-Out (FEFO) engine evaluates biological crossmatch compatibility and prioritizes units with the closest expiration date to avoid inventory wastage.
+        </p>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>Unit ID</th>
+                <th>Blood Group</th>
+                <th>Component</th>
+                <th>Expiry Date</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody id="fefoCandidatesTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('fefoAllocationModal')">Close</button>
+        <button class="btn btn-secondary" id="fefoConfirmBtn" onclick="confirmFefoAllocation()">Confirm FEFO Reservation</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Issue Certificate / Dispatch Voucher Modal -->
+  <div class="modal-backdrop" id="issueCertificateModal">
+    <div class="modal-content" style="max-width:700px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Official Blood Dispatch Voucher</h3>
+        <button class="modal-close" onclick="closeModal('issueCertificateModal')">&times;</button>
+      </div>
+      <div class="modal-body" id="printableCertificate">
+        <div style="border: 2px solid #0f172a; padding: 1.5rem; border-radius: 8px; background: #fff;">
+          <div style="text-align: center; border-bottom: 2px solid #dc2626; padding-bottom: 0.75rem; margin-bottom: 1rem;">
+            <h2 style="color: #dc2626; font-size: 1.4rem; font-weight: 800; letter-spacing: -0.02em;">PES BLOOD BANK & TRANSFUSION SERVICES</h2>
+            <p style="font-size: 0.8rem; color: #64748b;">Centralized Blood Repository • Good Clinical Laboratory Practice (GCLP)</p>
+            <h3 style="margin-top: 0.5rem; font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: #0f172a;">BLOOD UNIT DISPATCH CERTIFICATE</h3>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; font-size: 0.88rem; margin-bottom: 1rem;">
+            <div><strong>Dispatch ID:</strong> <span id="certIssueId"></span></div>
+            <div><strong>Date & Time:</strong> <span id="certTimestamp"></span></div>
+            <div><strong>Receiving Hospital:</strong> <span id="certHospital"></span></div>
+            <div><strong>Patient Name:</strong> <span id="certPatient"></span></div>
+            <div><strong>Issued Unit ID:</strong> <span id="certUnitId" style="color:#dc2626; font-weight:bold;"></span></div>
+            <div><strong>Product:</strong> <span id="certBloodGroup"></span></div>
+            <div><strong>Volume:</strong> <span id="certVolume"></span></div>
+            <div><strong>Product Expiry:</strong> <span id="certExpiry"></span></div>
+            <div style="grid-column: 1 / -1;"><strong>Quality Clearance:</strong> HIV 1/2, HBV, HCV, Syphilis, Malaria NEGATIVE. Crossmatch: COMPATIBLE.</div>
+            <div style="grid-column: 1 / -1;"><strong>Verification Notes:</strong> <span id="certNotes"></span></div>
+          </div>
+
+          <div style="margin-top: 1.5rem; display: flex; justify-content: space-between; padding-top: 1rem; border-top: 1px dashed #cbd5e1; font-size: 0.8rem;">
+            <div>
+              <p><strong>Issuing Officer:</strong> <span id="certStaff"></span></p>
+              <p style="color: #64748b;">Digital Signature Verified</p>
+            </div>
+            <div style="text-align: right;">
+              <p><strong>Hospital Receiving Staff:</strong></p>
+              <p style="color: #64748b;">Signature / Stamp Upon Delivery</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('issueCertificateModal')">Close</button>
+        <button class="btn btn-primary" onclick="window.print()">🖨️ Print Dispatch Certificate</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create System User Modal -->
+  <div class="modal-backdrop" id="createUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Create System User</h3>
+        <button class="modal-close" onclick="closeModal('createUserModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Username *</label>
+            <input type="text" id="newUsername" class="form-control" placeholder="e.g. nurse_rekha">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Password *</label>
+            <input type="password" id="newPassword" class="form-control" placeholder="Min 6 characters">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Full Name *</label>
+            <input type="text" id="newFullName" class="form-control" placeholder="e.g. Rekha Sen">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Email Address *</label>
+            <input type="email" id="newEmail" class="form-control" placeholder="rekha@bloodbank.org">
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Role Assignment *</label>
+            <select id="newRole" class="form-control">
+              <option value="staff">Staff (Collections, Inventory, Requests, Issues)</option>
+              <option value="hospital">Hospital (Submit Requests, Track Status)</option>
+              <option value="donor">Donor (Profile & History View)</option>
+              <option value="admin">Administrator (Full Access & User Control)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline" onclick="closeModal('createUserModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitCreateUser()">Create User Account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Drawer -->
+  <div id="notifDrawer" style="position:fixed; top:56px; right:-380px; width:360px; height:calc(100vh - 56px); background:#fff; box-shadow:var(--shadow-lg); transition:right 0.3s ease; z-index:90; display:flex; flex-direction:column; border-left:1px solid #e2e8f0;">
+    <div style="padding:1rem; border-bottom:1px solid #e2e8f0; display:flex; justify-content:space-between; align-items:center; background:#f8fafc;">
+      <h3 style="font-size:1rem; font-weight:700;">🔔 System Alerts</h3>
+      <button class="btn btn-sm btn-outline" onclick="markAllAlertsRead()">Mark Read</button>
+    </div>
+    <div id="notificationsList" style="flex:1; overflow-y:auto;"></div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
