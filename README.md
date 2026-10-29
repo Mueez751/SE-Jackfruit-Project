@@ -2,10 +2,17 @@
 
 **Software Engineering Laboratory Project**  
 **Students:** 
-N S Lokesh Naidu,
+N S Lokesh Naidu, Nandan Kumar K R, Mithun P Naik, Mueez ahmed
 
+## Team Members
 
-**SRN:** PES2UG24CS292 | **Section:** 5E  
+| Name | Scrum Role | Focus |
+|---|---|---|
+| Mueez Ahmed | Scrum Master | Authentication, audit log, admin moderation, plagiarism check |
+| Lokesh Naidu| Product Owner | Quiz creation, backlog and documentation |
+| Mithun P Naik | Developer | Integration testing, RBAC, performance tests |
+| Nandan Kumar K R | Developer | Frontend, CI/CD |
+**Section:** 5E  
 **Institution:** PES University  
 **SRS Reference:** `D:\SWE\Blood_Bank_Management_System_SRS.docx` (Version 1.1)
 
