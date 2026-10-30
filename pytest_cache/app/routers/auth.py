@@ -87,11 +87,9 @@ def login(payload: UserLogin, request: Request):
     }
 
 @router.post("/logout")
-def logout(request: Request, authorization: Optional[str] = Header(None)):
-    if authorization:
-        token = authorization.replace("Bearer ", "").strip()
-        client_ip = request.client.host if request.client else "127.0.0.1"
-        logout_user(token, ip_address=client_ip)
+def logout(request: Request, current_user: dict = Depends(get_current_active_user)):
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    logout_user(current_user["token"], ip_address=client_ip)
     return {"message": "Logged out successfully."}
 
 @router.get("/me")

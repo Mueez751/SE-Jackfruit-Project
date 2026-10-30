@@ -1,15 +1,16 @@
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional, List
 from app.models import DonorCreate, EligibilityCheckRequest
 from app.services.donor_service import (
     register_donor, evaluate_and_record_eligibility,
     get_donor, list_donors, get_donor_donation_history
 )
+from app.routers.auth import require_roles
 
 router = APIRouter(prefix="/api/donors", tags=["Donors"])
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_donor(payload: DonorCreate, request: Request):
+def create_donor(payload: DonorCreate, request: Request, current_user: dict = Depends(require_roles(["staff", "admin"]))):
     client_ip = request.client.host if request.client else "127.0.0.1"
     try:
         donor_id = register_donor(
@@ -21,7 +22,7 @@ def create_donor(payload: DonorCreate, request: Request):
             email=payload.email,
             address=payload.address,
             medical_remarks=payload.medical_remarks,
-            actor_username="staff",
+            actor_username=current_user["username"],
             ip_address=client_ip
         )
         return {"donor_id": donor_id, "message": "Donor registered successfully."}
@@ -31,19 +32,20 @@ def create_donor(payload: DonorCreate, request: Request):
 @router.get("")
 def get_donors(
     search: Optional[str] = Query(None, description="Search by name, ID, or phone"),
-    blood_group: Optional[str] = Query(None, description="Filter by blood group")
+    blood_group: Optional[str] = Query(None, description="Filter by blood group"),
+    current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
     return list_donors(query=search, blood_group=blood_group)
 
 @router.get("/{donor_id}")
-def get_single_donor(donor_id: str):
+def get_single_donor(donor_id: str, current_user: dict = Depends(require_roles(["staff", "admin"]))):
     donor = get_donor(donor_id)
     if not donor:
         raise HTTPException(status_code=404, detail=f"Donor {donor_id} not found.")
     return donor
 
 @router.post("/{donor_id}/eligibility")
-def check_donor_eligibility(donor_id: str, payload: EligibilityCheckRequest, request: Request):
+def check_donor_eligibility(donor_id: str, payload: EligibilityCheckRequest, request: Request, current_user: dict = Depends(require_roles(["staff", "admin"]))):
     client_ip = request.client.host if request.client else "127.0.0.1"
     is_eligible, reasons = evaluate_and_record_eligibility(
         donor_id=donor_id,
@@ -54,7 +56,7 @@ def check_donor_eligibility(donor_id: str, payload: EligibilityCheckRequest, req
         pulse=payload.pulse,
         days_since_last_donation=payload.days_since_last_donation,
         medical_flags=payload.medical_flags,
-        actor_username="staff",
+        actor_username=current_user["username"],
         ip_address=client_ip
     )
     return {
@@ -65,7 +67,7 @@ def check_donor_eligibility(donor_id: str, payload: EligibilityCheckRequest, req
     }
 
 @router.get("/{donor_id}/history")
-def get_donor_history(donor_id: str):
+def get_donor_history(donor_id: str, current_user: dict = Depends(require_roles(["staff", "admin"]))):
     donor = get_donor(donor_id)
     if not donor:
         raise HTTPException(status_code=404, detail=f"Donor {donor_id} not found.")
