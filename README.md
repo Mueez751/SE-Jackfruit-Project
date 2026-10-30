@@ -2,7 +2,7 @@
 
 **Software Engineering Laboratory Project**  
 **Students:** 
-N S Lokesh Naidu, Nandan Kumar K R, Mithun P Naik, Mueez ahmed
+N Sai Lokesh Naidu, Nandan Kumar K R, Mithun P Naik, Mueez ahmed
 
 ## Team Members
 
