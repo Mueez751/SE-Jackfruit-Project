@@ -345,3 +345,133 @@ def test_tc_perf_01_response_time(client):
     assert res.status_code == 200
     assert duration < 3.0, f"Response took {duration}s, exceeding 3.0s SLA"
 
+# ==================== STAGE 1: RBAC & AUTHENTICATION DEPENDENCY TESTS ====================
+
+def test_rbac_unauthenticated_request_returns_401(client):
+    """Verify that accessing an authenticated endpoint without Bearer token returns 401 Unauthorized."""
+    res = client.get("/api/auth/me")
+    assert res.status_code == 401
+    assert "Missing authentication credentials." in res.json().get("detail", "")
+
+def test_rbac_invalid_token_returns_401(client):
+    """Verify that accessing an authenticated endpoint with an invalid Bearer token returns 401 Unauthorized."""
+    res = client.get("/api/auth/me", headers={"Authorization": "Bearer invalid_token_12345"})
+    assert res.status_code == 401
+    assert "Invalid or expired session token." in res.json().get("detail", "")
+
+def test_rbac_valid_token_allows_me_endpoint(client):
+    """Verify that authenticating and passing a valid Bearer token returns 200 OK and user data."""
+    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    assert login_res.status_code == 200
+    token = login_res.json()["token"]
+
+    me_res = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me_res.status_code == 200
+    user = me_res.json()
+    assert user["username"] == "admin"
+    assert user["role"] == "admin"
+
+def test_rbac_role_authorization_forbidden_returns_403(client):
+    """Verify require_roles returns 403 Forbidden when authenticated user lacks the required role."""
+    from fastapi import FastAPI, Depends
+    from app.routers.auth import require_roles
+
+    test_app = FastAPI()
+
+    @test_app.get("/admin-only")
+    def admin_only_endpoint(user: dict = Depends(require_roles(["admin"]))):
+        return {"message": "admin granted", "user": user["username"]}
+
+    test_client = TestClient(test_app)
+
+    # Login as donor using main client to generate session in _ACTIVE_SESSIONS
+    login_res = client.post("/api/auth/login", json={"username": "donor", "password": "donor123"})
+    assert login_res.status_code == 200
+    donor_token = login_res.json()["token"]
+
+    # Donor attempting to access admin-only endpoint must get 403 Forbidden
+    res = test_client.get("/admin-only", headers={"Authorization": f"Bearer {donor_token}"})
+    assert res.status_code == 403
+    assert "Access forbidden" in res.json().get("detail", "")
+    assert "donor" in res.json().get("detail", "")
+
+def test_rbac_role_authorization_allowed_returns_200(client):
+    """Verify require_roles returns 200 OK when user possesses the required role."""
+    from fastapi import FastAPI, Depends
+    from app.routers.auth import require_roles
+
+    test_app = FastAPI()
+
+    @test_app.get("/admin-only")
+    def admin_only_endpoint(user: dict = Depends(require_roles(["admin"]))):
+        return {"message": "admin granted", "user": user["username"]}
+
+    test_client = TestClient(test_app)
+
+    # Login as admin
+    login_res = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    assert login_res.status_code == 200
+    admin_token = login_res.json()["token"]
+
+    res = test_client.get("/admin-only", headers={"Authorization": f"Bearer {admin_token}"})
+    assert res.status_code == 200
+    assert res.json()["message"] == "admin granted"
+    assert res.json()["user"] == "admin"
+
+def test_rbac_multi_role_authorization(client):
+    """Verify require_roles accepts any role among a permitted list (e.g. ['staff', 'admin'])."""
+    from fastapi import FastAPI, Depends
+    from app.routers.auth import require_roles
+
+    test_app = FastAPI()
+
+    @test_app.get("/clinical")
+    def clinical_endpoint(user: dict = Depends(require_roles(["staff", "admin"]))):
+        return {"message": "clinical granted", "role": user["role"]}
+
+    test_client = TestClient(test_app)
+
+    # Staff user (authorized)
+    staff_login = client.post("/api/auth/login", json={"username": "staff", "password": "staff123"})
+    assert staff_login.status_code == 200
+    staff_token = staff_login.json()["token"]
+    staff_res = test_client.get("/clinical", headers={"Authorization": f"Bearer {staff_token}"})
+    assert staff_res.status_code == 200
+    assert staff_res.json()["role"] == "staff"
+
+    # Hospital user (forbidden)
+    hosp_login = client.post("/api/auth/login", json={"username": "hospital", "password": "hospital123"})
+    assert hosp_login.status_code == 200
+    hosp_token = hosp_login.json()["token"]
+    hosp_res = test_client.get("/clinical", headers={"Authorization": f"Bearer {hosp_token}"})
+    assert hosp_res.status_code == 403
+    assert "Access forbidden" in hosp_res.json().get("detail", "")
+
+def test_rbac_expired_token_returns_401(client):
+    """Verify that an expired session token returns 401 Unauthorized."""
+    from datetime import datetime, timedelta
+    from app.services.auth_service import _ACTIVE_SESSIONS
+
+    login_res = client.post("/api/auth/login", json={"username": "staff", "password": "staff123"})
+    assert login_res.status_code == 200
+    token = login_res.json()["token"]
+
+    # Artificially expire the session timestamp
+    _ACTIVE_SESSIONS[token]["expires_at"] = datetime.utcnow() - timedelta(minutes=10)
+
+    res = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 401
+    assert "Invalid or expired session token." in res.json().get("detail", "")
+
+
+def test_rbac_unsupported_auth_scheme_returns_401(client):
+    """Verify that using an unsupported scheme like Basic returns 401 Unauthorized."""
+    res = client.get("/api/auth/me", headers={"Authorization": "Basic dXNlcjpwYXNz"})
+    assert res.status_code == 401
+    assert "Unsupported authorization scheme or invalid header format." in res.json().get("detail", "")
+
+def test_rbac_empty_bearer_token_returns_401(client):
+    """Verify that providing 'Bearer ' with an empty token returns 401 Unauthorized."""
+    res = client.get("/api/auth/me", headers={"Authorization": "Bearer   "})
+    assert res.status_code == 401
+    assert "Authentication token is missing." in res.json().get("detail", "")
