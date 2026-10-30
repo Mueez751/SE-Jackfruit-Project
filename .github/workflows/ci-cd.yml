@@ -1,0 +1,76 @@
+name: BBMS CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Unit & Acceptance Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest-cov
+
+      - name: Execute Pytest Suite (20 Acceptance Tests)
+        run: |
+          python -m pytest tests/ -v --junitxml=pytest-results.xml --cov=app --cov-report=term-missing
+
+      - name: Upload Test Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-python-${{ matrix.python-version }}
+          path: pytest-results.xml
+
+  build-and-verify:
+    name: Package & Deployment Readiness Check
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install App Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify Application Launch
+        run: |
+          python -c "import app.database; print('Database Schema initialized successfully.')"
+          python -c "from app.main import app; print('FastAPI Application loaded successfully.')"
+
+      - name: Deployment Gate Status
+        run: |
+          echo "=========================================================="
+          echo "✅ All 20 SRS acceptance tests passed."
+          echo "✅ Database schema & ASGI application successfully verified."
+          echo "🚀 Blood Bank Management System is ready for deployment!"
+          echo "=========================================================="
