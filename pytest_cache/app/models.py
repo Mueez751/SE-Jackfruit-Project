@@ -115,29 +115,6 @@ class BloodUnitResponse(BaseModel):
     is_expired: bool
 
 # Request Models
-class BloodRequestCreate(BaseModel):
-    hospital_name: str = Field(..., min_length=2, max_length=150)
-    requester_name: str = Field(..., min_length=2, max_length=100)
-    patient_name: str = Field(..., min_length=2, max_length=100)
-    patient_blood_group: str
-    component_type: str
-    quantity: int = Field(..., ge=1, le=20)
-    urgency: str = Field(default="Normal", pattern="^(Normal|Urgent|Emergency)$")
-    required_date: date
-
-    @field_validator("patient_blood_group")
-    @classmethod
-    def validate_group(cls, v):
-        if v not in BLOOD_GROUPS:
-            raise ValueError(f"Invalid blood group: {v}")
-        return v
-
-    @field_validator("component_type")
-    @classmethod
-    def validate_comp(cls, v):
-        if v not in COMPONENT_TYPES:
-            raise ValueError(f"Invalid component type: {v}")
-        return v
 
 class BloodRequestDecision(BaseModel):
     decision: str = Field(..., pattern="^(Approved|Rejected|On_Hold)$")
