@@ -556,16 +556,7 @@ async function loadRequests() {
   } catch (err) {}
 }
 
-function openNewRequestModal() {
-  document.getElementById("reqHospital").value = "City Care Hospital";
-  document.getElementById("reqDoctor").value = "Dr. S. Patil";
-  document.getElementById("reqPatient").value = "";
-  document.getElementById("reqGroup").value = "O+";
-  document.getElementById("reqComp").value = "Whole Blood";
-  document.getElementById("reqQuantity").value = "1";
-  document.getElementById("reqUrgency").value = "Normal";
-  openModal("newRequestModal");
-}
+
 
 async function submitNewRequest() {
   const hospital_name = document.getElementById("reqHospital").value.trim();
