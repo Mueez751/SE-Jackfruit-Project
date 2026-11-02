@@ -140,7 +140,49 @@ def update_unit_status(
         )
 
     return True, None
+    def auto_mark_expired_units() -> int:
+    """
+    Automatically mark blood units as expired when expiry date is reached (BBMS-F-007).
+    Prevents their issue and triggers notification.
+    """
+    today_str = date.today().isoformat()
+    expired_count = 0
 
+    with get_db() as db:
+        # Find units that are past expiry date and still Available or Reserved or Quarantined
+        units = db.execute(
+            """
+            SELECT unit_id, blood_group, component_type, status, expiry_date
+            FROM blood_units
+            WHERE expiry_date < ? AND status NOT IN ('Expired', 'Discarded', 'Issued')
+            """,
+            (today_str,)
+        ).fetchall()
+
+        for u in units:
+            unit_id = u["unit_id"]
+            prev_status = u["status"]
+            db.execute(
+                "UPDATE blood_units SET status = 'Expired', updated_at = CURRENT_TIMESTAMP WHERE unit_id = ?",
+                (unit_id,)
+            )
+            db.execute(
+                """
+                INSERT INTO unit_status_logs (unit_id, previous_status, new_status, reason, changed_by)
+                VALUES (?, ?, 'Expired', 'Automatic system expiry date elapsed', 'SYSTEM')
+                """,
+                (unit_id, prev_status)
+            )
+            db.execute(
+                """
+                INSERT INTO inventory_alerts (alert_type, severity, message)
+                VALUES ('Expired_Unit', 'Warning', ?)
+                """,
+                (f"Blood Unit {unit_id} ({u['blood_group']} {u['component_type']}) expired on {u['expiry_date']} and has been decommissioned.",)
+            )
+            expired_count += 1
+
+    return expired_count
 
 def get_inventory_summary() -> Dict[str, Any]:
     """Maintain current inventory counts by blood group, component, and availability status (BBMS-F-006)."""
