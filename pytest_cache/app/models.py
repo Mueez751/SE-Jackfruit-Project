@@ -95,6 +95,11 @@ class CollectionCreate(BaseModel):
         if v not in COMPONENT_TYPES:
             raise ValueError(f"Invalid component type: {v}")
         return v
+        
+class UnitStatusUpdate(BaseModel):
+    status: str = Field(..., pattern="^(Available|Quarantined|Discarded)$")
+    reason: str = Field(..., min_length=3, max_length=255)
+
 class BloodUnitResponse(BaseModel):
     unit_id: str
     collection_id: Optional[str]
