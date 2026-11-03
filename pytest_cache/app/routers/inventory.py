@@ -2,7 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional
 from app.models import UnitStatusUpdate
 from app.services.inventory_service import (
-    get_inventory_summary, list_blood_units, update_unit_status, auto_mark_expired_units
+    get_inventory_summary, list_blood_units, update_unit_status, auto_mark_expired_units,
+    get_unit, get_unit_traceability
 )
 from app.routers.auth import get_current_active_user, require_roles
 
@@ -28,6 +29,22 @@ def get_units(
         status=status,
         query=search
     )
+
+@router.get("/units/{unit_id}/trace")
+def trace_single_unit(unit_id: str, current_user: dict = Depends(require_roles(["staff", "admin"]))):
+    """End-to-end unit traceability from donor collection to patient recipient (BBMS-F-004). Staff and Admin only."""
+    trace = get_unit_traceability(unit_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail=f"Blood unit {unit_id} not found.")
+    return trace
+
+@router.get("/units/{unit_id}")
+def get_single_unit(unit_id: str, current_user: dict = Depends(require_roles(["staff", "admin"]))):
+    """Retrieve blood unit metadata and status (BBMS-F-004, BBMS-F-016). Staff and Admin only."""
+    unit = get_unit(unit_id)
+    if not unit:
+        raise HTTPException(status_code=404, detail=f"Blood unit {unit_id} not found.")
+    return unit
 
 @router.patch("/units/{unit_id}/status")
 def change_unit_status(

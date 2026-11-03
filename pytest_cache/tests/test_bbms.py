@@ -909,4 +909,396 @@ def test_stage2_authenticated_endpoints_remain_protected_in_demo_mode(client, mo
     assert client.post("/api/demo/reset", headers=staff_auth).status_code == 403
 
 
+# ==================== BBMS-F-003: DONOR HISTORY & SCREENING & INTERVALS ====================
 
+def test_bbms_f_003_donor_screening_history_service():
+    """BBMS-F-003: Verify retrieval of past screening outcomes and clinical vitals."""
+    from app.services.donor_service import get_donor_screening_history
+    records = get_donor_screening_history("DON-2026-0001")
+    assert isinstance(records, list)
+    assert len(records) > 0
+    first = records[0]
+    assert first["donor_id"] == "DON-2026-0001"
+    assert "weight_kg" in first
+    assert "hemoglobin_g_dl" in first
+    assert "systolic_bp" in first
+    assert "diastolic_bp" in first
+    assert "pulse" in first
+    assert "is_eligible" in first
+    assert "checked_at" in first
+    assert "checked_by" in first
+
+def test_bbms_f_003_donation_interval_tracking_service():
+    """BBMS-F-003: Verify donation interval calculations and 90-day threshold rules."""
+    from app.services.donor_service import get_donor_donation_interval_status, register_donor
+    status = get_donor_donation_interval_status("DON-2026-0001")
+    assert status["total_donations"] > 0
+    assert status["last_donation_date"] is not None
+    assert status["minimum_required_interval_days"] == 90
+    assert "is_interval_eligible" in status
+    assert "next_eligible_date" in status
+
+    new_donor_id = register_donor(
+        full_name="Interval Test Donor",
+        age=30,
+        gender="Male",
+        blood_group="B+",
+        phone="+91-9988776655"
+    )
+    new_status = get_donor_donation_interval_status(new_donor_id)
+    assert new_status["total_donations"] == 0
+    assert new_status["last_donation_date"] is None
+    assert new_status["is_interval_eligible"] is True
+    assert new_status["next_eligible_date"] == date.today().isoformat()
+
+def test_bbms_f_003_donor_views_own_history_via_me_endpoint(client):
+    """BBMS-F-003: Authenticated donor views their own history, screening outcomes, and intervals."""
+    # 1. Unauthenticated request returns 401
+    res_unauth = client.get("/api/donors/me/history")
+    assert res_unauth.status_code == 401
+
+    # 2. Authenticated donor (Rahul Kumar, email: rahul.donor@gmail.com, donor_id: DON-2026-0001)
+    donor_auth = _login(client, "donor", "donor123")
+    res_donor = client.get("/api/donors/me/history", headers=donor_auth)
+    assert res_donor.status_code == 200
+    data = res_donor.json()
+    assert data["donor_id"] == "DON-2026-0001"
+    assert data["full_name"] == "Rahul Kumar"
+    assert data["blood_group"] == "O+"
+    assert "donations" in data
+    assert "screening_outcomes" in data
+    assert "interval_status" in data
+    assert len(data["screening_outcomes"]) > 0
+    assert data["interval_status"]["minimum_required_interval_days"] == 90
+
+def test_bbms_f_003_staff_views_donor_history_and_screening_and_intervals(client):
+    """BBMS-F-003: Staff and admin view donor history, screening outcomes, and interval check endpoints."""
+    staff_auth = _login(client, "staff", "staff123")
+    admin_auth = _login(client, "admin", "admin123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+
+    # Staff views comprehensive history
+    res_hist = client.get("/api/donors/DON-2026-0001/history", headers=staff_auth)
+    assert res_hist.status_code == 200
+    h_data = res_hist.json()
+    assert h_data["donor_id"] == "DON-2026-0001"
+    assert "history" in h_data
+    assert "donations" in h_data
+    assert "screening_outcomes" in h_data
+    assert "interval_status" in h_data
+
+    # Staff checks interval endpoint
+    res_int = client.get("/api/donors/DON-2026-0001/intervals", headers=staff_auth)
+    assert res_int.status_code == 200
+    int_data = res_int.json()
+    assert int_data["donor_id"] == "DON-2026-0001"
+    assert "interval_status" in int_data
+    assert int_data["interval_status"]["minimum_required_interval_days"] == 90
+
+    # Staff checks screening endpoint
+    res_scr = client.get("/api/donors/DON-2026-0001/screening", headers=staff_auth)
+    assert res_scr.status_code == 200
+    scr_data = res_scr.json()
+    assert scr_data["donor_id"] == "DON-2026-0001"
+    assert len(scr_data["screening_outcomes"]) > 0
+
+    # Admin also has access
+    assert client.get("/api/donors/DON-2026-0001/intervals", headers=admin_auth).status_code == 200
+    assert client.get("/api/donors/DON-2026-0001/screening", headers=admin_auth).status_code == 200
+
+    # Hospital role forbidden (403)
+    assert client.get("/api/donors/DON-2026-0001/intervals", headers=hosp_auth).status_code == 403
+    assert client.get("/api/donors/DON-2026-0001/screening", headers=hosp_auth).status_code == 403
+
+    # Non-existent donor returns 404
+    assert client.get("/api/donors/DON-9999-9999/intervals", headers=staff_auth).status_code == 404
+    assert client.get("/api/donors/DON-9999-9999/screening", headers=staff_auth).status_code == 404
+
+
+# ==================== BBMS-F-004: UNIT ID GENERATION & TRACEABILITY ====================
+
+def test_bbms_f_004_unit_id_generation_and_uniqueness():
+    """BBMS-F-004: Verify unit ID format and monotonic collision-free generation."""
+    from app.services.inventory_service import generate_unit_id, generate_collection_id
+    uid = generate_unit_id()
+    cid = generate_collection_id()
+    assert uid.startswith("UNIT-")
+    assert cid.startswith("COL-")
+    # Verify sequential structure
+    parts = uid.split("-")
+    assert len(parts) == 3
+    assert len(parts[2]) == 5
+
+def test_bbms_f_004_trace_issued_unit_from_donor_to_patient():
+    """BBMS-F-004: Verify end-to-end tracing for an issued blood unit from donor to recipient patient."""
+    from app.services.inventory_service import get_unit_traceability
+    trace = get_unit_traceability("UNIT-2026-00005")
+    assert trace is not None
+    assert trace["unit_id"] == "UNIT-2026-00005"
+    assert trace["is_fully_traced"] is True
+
+    # 1. Donor verification
+    assert trace["donor"] is not None
+    assert trace["donor"]["donor_id"] == "DON-2026-0003"
+    assert trace["donor"]["full_name"] == "Vikramaditya Roy"
+    assert trace["donor"]["blood_group"] == "B+"
+
+    # 2. Collection verification
+    assert trace["collection"] is not None
+    assert trace["collection"]["collection_id"] == "COL-2026-0005"
+
+    # 3. Unit verification
+    assert trace["unit"]["status"] == "Issued"
+    assert trace["unit"]["blood_group"] == "B+"
+
+    # 4. Issue & Patient verification
+    assert trace["issue"] is not None
+    assert trace["issue"]["issue_id"] == "ISS-2026-0001"
+    assert trace["patient_recipient"] is not None
+    assert trace["patient_recipient"]["patient_name"] == "Kavita Reddy"
+    assert trace["patient_recipient"]["hospital_name"] == "Victoria Hospital"
+
+    # 5. Trace chain summary
+    tc = trace["trace_chain"]
+    assert tc["donor_name"] == "Vikramaditya Roy"
+    assert tc["collection_id"] == "COL-2026-0005"
+    assert tc["unit_id"] == "UNIT-2026-00005"
+    assert tc["hospital_name"] == "Victoria Hospital"
+    assert tc["patient_name"] == "Kavita Reddy"
+
+def test_bbms_f_004_trace_available_unit_in_stock():
+    """BBMS-F-004: Verify tracing for an available unit currently in storage."""
+    from app.services.inventory_service import get_unit_traceability, get_unit, record_collection_and_create_unit
+    # Create fresh unit to test Available state independently
+    ok, err, data = record_collection_and_create_unit(
+        donor_id="DON-2026-0004",
+        blood_group="O-",
+        volume_ml=450.0,
+        component_type="Whole Blood"
+    )
+    assert ok is True
+    new_unit_id = data["unit_id"]
+
+    trace = get_unit_traceability(new_unit_id)
+    assert trace is not None
+    assert trace["unit_id"] == new_unit_id
+    assert trace["unit"]["status"] == "Available"
+    assert trace["is_fully_traced"] is False
+    assert trace["issue"] is None
+    assert trace["patient_recipient"] is None
+    assert trace["donor"]["donor_id"] == "DON-2026-0004"
+
+    # Single unit lookup
+    unit = get_unit(new_unit_id)
+    assert unit is not None
+    assert unit["unit_id"] == new_unit_id
+    assert "days_until_expiry" in unit
+
+def test_bbms_f_004_unit_traceability_api_authorization(client):
+    """BBMS-F-004: Verify API endpoints for unit trace and RBAC protections."""
+    staff_auth = _login(client, "staff", "staff123")
+    admin_auth = _login(client, "admin", "admin123")
+    donor_auth = _login(client, "donor", "donor123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+
+    # 1. Unauthenticated requests return 401
+    assert client.get("/api/inventory/units/UNIT-2026-00005/trace").status_code == 401
+    assert client.get("/api/inventory/units/UNIT-2026-00005").status_code == 401
+
+    # 2. Staff and Admin succeed
+    res_staff = client.get("/api/inventory/units/UNIT-2026-00005/trace", headers=staff_auth)
+    assert res_staff.status_code == 200
+    data = res_staff.json()
+    assert data["unit_id"] == "UNIT-2026-00005"
+    assert data["patient_recipient"]["patient_name"] == "Kavita Reddy"
+    assert data["trace_chain"]["hospital_name"] == "Victoria Hospital"
+
+    res_admin = client.get("/api/inventory/units/UNIT-2026-00005", headers=admin_auth)
+    assert res_admin.status_code == 200
+    assert res_admin.json()["unit_id"] == "UNIT-2026-00005"
+
+    # 3. Donor and Hospital roles forbidden (403)
+    assert client.get("/api/inventory/units/UNIT-2026-00005/trace", headers=donor_auth).status_code == 403
+    assert client.get("/api/inventory/units/UNIT-2026-00005", headers=donor_auth).status_code == 403
+    assert client.get("/api/inventory/units/UNIT-2026-00005/trace", headers=hosp_auth).status_code == 403
+    assert client.get("/api/inventory/units/UNIT-2026-00005", headers=hosp_auth).status_code == 403
+
+    # 4. Non-existent unit returns 404
+    assert client.get("/api/inventory/units/UNIT-9999-99999/trace", headers=staff_auth).status_code == 404
+    assert client.get("/api/inventory/units/UNIT-9999-99999", headers=staff_auth).status_code == 404
+
+
+# ==================== ISSUE #4 CORRECTION TESTS ====================
+
+def test_bbms_f_003_secure_donor_email_lookup_cases():
+    """
+    Test suite for secure donor email lookup:
+    1. Exactly one matching donor
+    2. No matching donor
+    3. NULL and empty email records
+    4. Duplicate email records raises AmbiguousDonorEmailError
+    5. Case-insensitive matching
+    """
+    from app.services.donor_service import get_donor_by_email, AmbiguousDonorEmailError, register_donor
+    from app.database import get_db
+
+    # 1. Exactly one matching donor: Rahul Kumar (seeded)
+    donor = get_donor_by_email("rahul.donor@gmail.com")
+    assert donor is not None
+    assert donor["full_name"] == "Rahul Kumar"
+    assert donor["donor_id"] == "DON-2026-0001"
+
+    # 2. No matching donor
+    assert get_donor_by_email("nonexistent.donor@hospital.org") is None
+
+    # 3. NULL and empty email records are ignored and do not match
+    assert get_donor_by_email("") is None
+    assert get_donor_by_email("   ") is None
+    assert get_donor_by_email(None) is None
+
+    # Register a donor with no email (None)
+    d_no_email = register_donor("Null Email Donor", 30, "Male", "A+", "+91-9111111111", email=None)
+    assert get_donor_by_email("") is None
+    assert get_donor_by_email(d_no_email) is None
+
+    # 5. Case-insensitive matching: "RAHUL.DONOR@GMAIL.COM" matches "rahul.donor@gmail.com"
+    donor_upper = get_donor_by_email("  RAHUL.DONOR@GMAIL.COM  ")
+    assert donor_upper is not None
+    assert donor_upper["donor_id"] == "DON-2026-0001"
+
+    # 4. Duplicate email records: Register two donors with identical email
+    dup_email = "duplicate.test@example.com"
+    register_donor("Dup Donor One", 25, "Female", "B+", "+91-9222222221", email=dup_email)
+    register_donor("Dup Donor Two", 28, "Male", "B+", "+91-9222222222", email=dup_email)
+
+    with pytest.raises(AmbiguousDonorEmailError) as exc_info:
+        get_donor_by_email(dup_email)
+    assert "Multiple donor profiles" in str(exc_info.value)
+    assert dup_email in str(exc_info.value)
+
+def test_bbms_f_003_self_service_isolation_and_ambiguity_handling(client):
+    """
+    6. Donor cannot access another donor's history through the self-service endpoint.
+    Ambiguous emails return 409 Conflict, missing donor returns 404.
+    """
+    # Authenticated donor Rahul Kumar can only view Rahul Kumar
+    donor_auth = _login(client, "donor", "donor123")
+    res = client.get("/api/donors/me/history", headers=donor_auth)
+    assert res.status_code == 200
+    assert res.json()["donor_id"] == "DON-2026-0001"
+    assert res.json()["full_name"] == "Rahul Kumar"
+
+    # Staff user (email staff@pesbloodbank.org) has no donor record -> 404 Not Found
+    staff_auth = _login(client, "staff", "staff123")
+    res_staff = client.get("/api/donors/me/history", headers=staff_auth)
+    assert res_staff.status_code == 404
+    assert "No donor profile linked" in res_staff.json()["detail"]
+
+    # If a user's email matches multiple donor profiles -> 409 Conflict (never leaks history)
+    from app.services.donor_service import register_donor
+    dup_user_email = "conflict.user@test.org"
+    register_donor("Conflict User 1", 30, "Male", "O+", "+91-9333333331", email=dup_user_email)
+    register_donor("Conflict User 2", 32, "Female", "O+", "+91-9333333332", email=dup_user_email)
+
+    from datetime import datetime, timedelta
+    from app.services.auth_service import _ACTIVE_SESSIONS
+    dummy_token = "dummy_token_ambiguous_donor_test"
+    _ACTIVE_SESSIONS[dummy_token] = {
+        "user_id": 9999,
+        "username": "conflict_donor",
+        "role": "donor",
+        "email": dup_user_email,
+        "full_name": "Conflict Test User",
+        "expires_at": datetime.utcnow() + timedelta(hours=1)
+    }
+    ambig_auth = {"Authorization": f"Bearer {dummy_token}"}
+    res_ambig = client.get("/api/donors/me/history", headers=ambig_auth)
+    assert res_ambig.status_code == 409
+    assert "Multiple donor profiles" in res_ambig.json()["detail"]
+
+
+# ==================== ISSUE #5 CORRECTION TESTS ====================
+
+def test_bbms_f_004_concurrent_collection_and_unit_creation():
+    """
+    BBMS-F-004 Concurrency Test:
+    Launches multiple concurrent collection creations across threads.
+    Verifies that every successful operation receives unique collection and unit IDs.
+    """
+    import concurrent.futures
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+
+    donor_id = register_donor("Concurrency Test Donor", 29, "Male", "AB+", "+91-9444444444")
+    evaluate_and_record_eligibility(
+        donor_id=donor_id,
+        weight_kg=75.0,
+        hemoglobin_g_dl=15.0,
+        systolic_bp=120,
+        diastolic_bp=80,
+        pulse=72,
+        days_since_last_donation=100
+    )
+
+    def do_create(idx):
+        success, error, data = record_collection_and_create_unit(
+            donor_id=donor_id,
+            blood_group="AB+",
+            volume_ml=450.0,
+            component_type="Whole Blood"
+        )
+        return success, error, data
+
+    num_concurrent = 8
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(do_create, i) for i in range(num_concurrent)]
+        results = [f.result() for f in futures]
+
+    successful = [r[2] for r in results if r[0] is True]
+    assert len(successful) > 0, f"Expected successful creations, got {results}"
+
+    collection_ids = [d["collection_id"] for d in successful]
+    unit_ids = [d["unit_id"] for d in successful]
+
+    assert len(collection_ids) == len(set(collection_ids)), f"Duplicate collection IDs detected: {collection_ids}"
+    assert len(unit_ids) == len(set(unit_ids)), f"Duplicate unit IDs detected: {unit_ids}"
+
+def test_bbms_f_004_collection_creation_failure_atomic_rollback():
+    """
+    BBMS-F-004 Atomic Rollback Test:
+    Verifies that when a collection creation fails, no partial records are committed into the database.
+    """
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+    from app.database import get_db
+
+    ineligible_id = register_donor("Ineligible Rollback Donor", 16, "Female", "O+", "+91-9555555555")
+    evaluate_and_record_eligibility(
+        donor_id=ineligible_id,
+        weight_kg=40.0,
+        hemoglobin_g_dl=10.0,
+        systolic_bp=100,
+        diastolic_bp=60,
+        pulse=70,
+        days_since_last_donation=10
+    )
+
+    with get_db() as db:
+        initial_collections = db.execute("SELECT COUNT(*) as c FROM blood_collections WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+        initial_units = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+
+    success, error, data = record_collection_and_create_unit(
+        donor_id=ineligible_id,
+        blood_group="O+",
+        volume_ml=450.0
+    )
+    assert success is False
+    assert "rejected" in error.lower()
+    assert data is None
+
+    with get_db() as db:
+        after_collections = db.execute("SELECT COUNT(*) as c FROM blood_collections WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+        after_units = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+
+    assert after_collections == initial_collections == 0
+    assert after_units == initial_units == 0

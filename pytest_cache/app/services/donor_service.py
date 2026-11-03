@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from app.database import get_db
 from app.config import (
@@ -196,3 +196,150 @@ def get_donor_donation_history(donor_id: str) -> List[Dict[str, Any]]:
             (donor_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+class AmbiguousDonorEmailError(Exception):
+    """Raised when multiple donor records match the same email address."""
+    pass
+
+def get_donor_by_email(email: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up a unique donor record by email address (BBMS-F-003).
+    Normalizes and validates email. Rejects NULL/empty emails.
+    If exactly one donor matches, returns donor dict.
+    If no donor matches, returns None.
+    If multiple donors match, raises AmbiguousDonorEmailError.
+    """
+    if not email or not isinstance(email, str):
+        return None
+
+    clean_email = email.strip()
+    if not clean_email:
+        return None
+
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT * FROM donors
+            WHERE email IS NOT NULL
+              AND TRIM(email) != ''
+              AND LOWER(email) = LOWER(?)
+            """,
+            (clean_email,)
+        ).fetchall()
+
+        if len(rows) == 0:
+            return None
+
+        if len(rows) > 1:
+            raise AmbiguousDonorEmailError(
+                f"Multiple donor profiles ({len(rows)}) found matching email '{clean_email}'."
+            )
+
+        d = dict(rows[0])
+        colls = db.execute(
+            "SELECT COUNT(*) as c, MAX(collection_date) as last_d FROM blood_collections WHERE donor_id = ?",
+            (d["donor_id"],)
+        ).fetchone()
+        d["donation_count"] = colls["c"] if colls else 0
+        d["last_donation_date"] = colls["last_d"] if colls else None
+        return d
+
+def get_donor_screening_history(donor_id: str) -> List[Dict[str, Any]]:
+    """Maintain donor screening outcomes (BBMS-F-003)."""
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT id, donor_id, weight_kg, hemoglobin_g_dl, systolic_bp, diastolic_bp, pulse,
+                   days_since_last_donation, is_eligible, rejection_reason, checked_at, checked_by
+            FROM eligibility_records
+            WHERE donor_id = ?
+            ORDER BY checked_at DESC
+            """,
+            (donor_id,)
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "donor_id": r["donor_id"],
+                "weight_kg": r["weight_kg"],
+                "hemoglobin_g_dl": r["hemoglobin_g_dl"],
+                "systolic_bp": r["systolic_bp"],
+                "diastolic_bp": r["diastolic_bp"],
+                "pulse": r["pulse"],
+                "days_since_last_donation": r["days_since_last_donation"],
+                "is_eligible": bool(r["is_eligible"]),
+                "rejection_reason": r["rejection_reason"],
+                "checked_at": str(r["checked_at"]),
+                "checked_by": r["checked_by"],
+            }
+            for r in rows
+        ]
+
+def get_donor_donation_interval_status(donor_id: str) -> Dict[str, Any]:
+    """Check donation intervals for staff and donors (BBMS-F-003)."""
+    with get_db() as db:
+        colls = db.execute(
+            "SELECT COUNT(*) as c, MAX(collection_date) as last_d FROM blood_collections WHERE donor_id = ?",
+            (donor_id,)
+        ).fetchone()
+        total_donations = colls["c"] if colls else 0
+        last_d = colls["last_d"] if colls else None
+
+        if not last_d:
+            return {
+                "total_donations": 0,
+                "last_donation_date": None,
+                "days_since_last_donation": None,
+                "minimum_required_interval_days": MIN_DONATION_INTERVAL_DAYS,
+                "is_interval_eligible": True,
+                "next_eligible_date": date.today().isoformat()
+            }
+
+        try:
+            last_date = datetime.strptime(last_d, "%Y-%m-%d").date()
+            days_since = (date.today() - last_date).days
+            is_eligible = days_since >= MIN_DONATION_INTERVAL_DAYS
+            next_date = last_date + timedelta(days=MIN_DONATION_INTERVAL_DAYS)
+            return {
+                "total_donations": total_donations,
+                "last_donation_date": last_d,
+                "days_since_last_donation": days_since,
+                "minimum_required_interval_days": MIN_DONATION_INTERVAL_DAYS,
+                "is_interval_eligible": is_eligible,
+                "next_eligible_date": next_date.isoformat() if not is_eligible else date.today().isoformat()
+            }
+        except Exception:
+            return {
+                "total_donations": total_donations,
+                "last_donation_date": last_d,
+                "days_since_last_donation": None,
+                "minimum_required_interval_days": MIN_DONATION_INTERVAL_DAYS,
+                "is_interval_eligible": True,
+                "next_eligible_date": date.today().isoformat()
+            }
+
+def get_full_donor_history(donor_id: str) -> Optional[Dict[str, Any]]:
+    """Comprehensive donor history including donations, screening outcomes, and interval status (BBMS-F-003)."""
+    donor = get_donor(donor_id)
+    if not donor:
+        return None
+
+    donations = get_donor_donation_history(donor_id)
+    screenings = get_donor_screening_history(donor_id)
+    interval_status = get_donor_donation_interval_status(donor_id)
+
+    return {
+        "donor_id": donor["donor_id"],
+        "full_name": donor["full_name"],
+        "blood_group": donor["blood_group"],
+        "age": donor["age"],
+        "gender": donor["gender"],
+        "phone": donor["phone"],
+        "email": donor["email"],
+        "total_donations": interval_status["total_donations"],
+        "history": donations,
+        "donations": donations,
+        "screening_outcomes": screenings,
+        "interval_status": interval_status,
+    }
