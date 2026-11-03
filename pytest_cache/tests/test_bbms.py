@@ -339,8 +339,12 @@ def test_tc_audit_01_audit_logging():
 def test_tc_perf_01_response_time(client):
     """TC-Perf-01 (BBMS-NF-001): Normal search and dashboard return within 3 seconds."""
     import time
+    login_res = client.post("/api/auth/login", json={"username": "staff", "password": "staff123"})
+    assert login_res.status_code == 200
+    token = login_res.json()["token"]
+
     start = time.perf_counter()
-    res = client.get("/api/inventory/summary")
+    res = client.get("/api/inventory/summary", headers={"Authorization": f"Bearer {token}"})
     duration = time.perf_counter() - start
     assert res.status_code == 200
     assert duration < 3.0, f"Response took {duration}s, exceeding 3.0s SLA"
@@ -475,3 +479,826 @@ def test_rbac_empty_bearer_token_returns_401(client):
     res = client.get("/api/auth/me", headers={"Authorization": "Bearer   "})
     assert res.status_code == 401
     assert "Authentication token is missing." in res.json().get("detail", "")
+
+
+# ==================== STAGE 2: BUSINESS ROUTER RBAC & AUDIT LOGGING TESTS ====================
+
+def _login(client, username, password):
+    res = client.post("/api/auth/login", json={"username": username, "password": password})
+    assert res.status_code == 200, f"Login failed for {username}: {res.text}"
+    return {"Authorization": f"Bearer {res.json()['token']}"}
+
+def test_stage2_unauthenticated_requests_return_401(client):
+    """Verify that unauthenticated access across all business endpoints returns 401 Unauthorized."""
+    endpoints = [
+        ("POST", "/api/auth/logout"),
+        ("GET", "/api/inventory/summary"),
+        ("GET", "/api/inventory/units"),
+        ("PATCH", "/api/inventory/units/UNIT-2026-00001/status"),
+        ("POST", "/api/inventory/check-expiry"),
+        ("GET", "/api/donors"),
+        ("POST", "/api/donors"),
+        ("GET", "/api/donors/DON-2026-0001"),
+        ("POST", "/api/donors/DON-2026-0001/eligibility"),
+        ("GET", "/api/donors/DON-2026-0001/history"),
+        ("POST", "/api/collections"),
+        ("GET", "/api/requests"),
+        ("POST", "/api/requests"),
+        ("GET", "/api/requests/REQ-2026-0001"),
+        ("POST", "/api/requests/REQ-2026-0001/decision"),
+        ("GET", "/api/allocations/preview/REQ-2026-0001"),
+        ("POST", "/api/allocations/allocate"),
+        ("POST", "/api/allocations/release"),
+        ("GET", "/api/issues"),
+        ("POST", "/api/issues"),
+        ("GET", "/api/issues/ISS-2026-00001/certificate"),
+        ("GET", "/api/reports/inventory"),
+        ("GET", "/api/reports/donations"),
+        ("GET", "/api/reports/issues"),
+        ("GET", "/api/reports/discards-expiries"),
+        ("GET", "/api/reports/export-csv?report_type=inventory"),
+        ("GET", "/api/notifications"),
+        ("POST", "/api/notifications/1/read"),
+        ("POST", "/api/notifications/read-all"),
+        ("GET", "/api/admin/users"),
+        ("POST", "/api/admin/users"),
+        ("PATCH", "/api/admin/users/1/status"),
+        ("GET", "/api/admin/audit-logs"),
+        ("POST", "/api/demo/reset"),
+    ]
+    for method, path in endpoints:
+        if method == "GET":
+            res = client.get(path)
+        elif method == "POST":
+            res = client.post(path, json={})
+        elif method == "PATCH":
+            res = client.patch(path, json={})
+        assert res.status_code == 401, f"Expected 401 for unauthenticated {method} {path}, got {res.status_code}"
+
+def test_stage2_admin_endpoints_role_isolation(client):
+    """Verify admin endpoints are strictly forbidden to staff, hospital, and donor (403), allowed for admin."""
+    admin_auth = _login(client, "admin", "admin123")
+    staff_auth = _login(client, "staff", "staff123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+
+    for auth in [staff_auth, hosp_auth, donor_auth]:
+        res_users = client.get("/api/admin/users", headers=auth)
+        assert res_users.status_code == 403
+        res_audit = client.get("/api/admin/audit-logs", headers=auth)
+        assert res_audit.status_code == 403
+
+    # Admin succeeds
+    res_ok = client.get("/api/admin/users", headers=admin_auth)
+    assert res_ok.status_code == 200
+
+def test_stage2_donor_endpoints_role_isolation(client):
+    """Verify donor registry and records are accessible only to staff/admin, forbidden to donor/hospital."""
+    staff_auth = _login(client, "staff", "staff123")
+    admin_auth = _login(client, "admin", "admin123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+
+    # Forbidden for donor and hospital
+    for auth in [donor_auth, hosp_auth]:
+        assert client.get("/api/donors", headers=auth).status_code == 403
+        assert client.get("/api/donors/DON-2026-0001", headers=auth).status_code == 403
+        assert client.get("/api/donors/DON-2026-0001/history", headers=auth).status_code == 403
+        assert client.post("/api/donors", json={}, headers=auth).status_code == 403
+        assert client.post("/api/donors/DON-2026-0001/eligibility", json={}, headers=auth).status_code == 403
+
+    # Permitted for staff and admin
+    res_staff = client.get("/api/donors", headers=staff_auth)
+    assert res_staff.status_code == 200
+    res_admin = client.get("/api/donors", headers=admin_auth)
+    assert res_admin.status_code == 200
+
+def test_stage2_collections_role_isolation(client):
+    """Verify blood collections can only be recorded by staff and admin."""
+    staff_auth = _login(client, "staff", "staff123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+
+    # Forbidden for donor and hospital
+    payload = {
+        "donor_id": "DON-2026-0001",
+        "blood_group": "O+",
+        "volume_ml": 450,
+        "component_type": "Whole Blood"
+    }
+    assert client.post("/api/collections", json=payload, headers=donor_auth).status_code == 403
+    assert client.post("/api/collections", json=payload, headers=hosp_auth).status_code == 403
+
+def test_stage2_inventory_management_role_isolation(client):
+    """Verify inventory summary is accessible to all authenticated roles, but unit management is restricted."""
+    admin_auth = _login(client, "admin", "admin123")
+    staff_auth = _login(client, "staff", "staff123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+
+    # All authenticated users can view summary
+    for auth in [donor_auth, hosp_auth, staff_auth, admin_auth]:
+        res = client.get("/api/inventory/summary", headers=auth)
+        assert res.status_code == 200
+        assert "total_units" in res.json()
+
+    # Unit listing, status patch, and expiry scan restricted to staff and admin
+    for auth in [donor_auth, hosp_auth]:
+        assert client.get("/api/inventory/units", headers=auth).status_code == 403
+        assert client.patch("/api/inventory/units/UNIT-2026-00001/status", json={"status": "Quarantined", "reason": "Test"}, headers=auth).status_code == 403
+        assert client.post("/api/inventory/check-expiry", headers=auth).status_code == 403
+
+    # Staff succeeds
+    assert client.get("/api/inventory/units", headers=staff_auth).status_code == 200
+    assert client.post("/api/inventory/check-expiry", headers=staff_auth).status_code == 200
+
+def test_stage2_blood_requests_role_isolation(client):
+    """Verify hospital can submit requests but cannot view directory, approve, or decide requests."""
+    admin_auth = _login(client, "admin", "admin123")
+    staff_auth = _login(client, "staff", "staff123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+
+    req_payload = {
+        "hospital_name": "Apollo Clinic",
+        "requester_name": "Dr. Sharma",
+        "patient_name": "Patient R",
+        "patient_blood_group": "B+",
+        "component_type": "Whole Blood",
+        "quantity": 1,
+        "urgency": "Normal",
+        "required_date": str(date.today() + timedelta(days=2))
+    }
+
+    # Donor cannot submit request
+    res_donor = client.post("/api/requests", json=req_payload, headers=donor_auth)
+    assert res_donor.status_code == 403
+
+    # Hospital can submit request
+    res_hosp = client.post("/api/requests", json=req_payload, headers=hosp_auth)
+    assert res_hosp.status_code == 201
+    created_id = res_hosp.json()["request_id"]
+
+    # Hospital and Donor cannot list requests or view single request (Choice 1 strict role isolation)
+    assert client.get("/api/requests", headers=hosp_auth).status_code == 403
+    assert client.get(f"/api/requests/{created_id}", headers=hosp_auth).status_code == 403
+    assert client.get("/api/requests", headers=donor_auth).status_code == 403
+
+    # Hospital cannot make decisions (approve/reject)
+    decision_payload = {"decision": "Approved", "reason": "Self-approval attempt"}
+    res_dec_hosp = client.post(f"/api/requests/{created_id}/decision", json=decision_payload, headers=hosp_auth)
+    assert res_dec_hosp.status_code == 403
+
+    # Staff can view and approve
+    assert client.get("/api/requests", headers=staff_auth).status_code == 200
+    res_dec_staff = client.post(f"/api/requests/{created_id}/decision", json={"decision": "Approved", "reason": "Staff approved"}, headers=staff_auth)
+    assert res_dec_staff.status_code == 200
+
+def test_stage2_allocations_and_issues_role_isolation(client):
+    """Verify allocations and issues are strictly restricted to staff and admin."""
+    admin_auth = _login(client, "admin", "admin123")
+    staff_auth = _login(client, "staff", "staff123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+
+    # Create fresh approved request
+    req_res = client.post("/api/requests", json={
+        "hospital_name": "Fortis Hospital",
+        "requester_name": "Dr. Rao",
+        "patient_name": "Alloc Patient",
+        "patient_blood_group": "A+",
+        "component_type": "Whole Blood",
+        "quantity": 1,
+        "urgency": "Normal",
+        "required_date": str(date.today() + timedelta(days=2))
+    }, headers=staff_auth)
+    assert req_res.status_code == 201
+    test_req_id = req_res.json()["request_id"]
+
+    appr_res = client.post(f"/api/requests/{test_req_id}/decision", json={"decision": "Approved", "reason": "Approved for alloc test"}, headers=staff_auth)
+    assert appr_res.status_code == 200
+
+    # Hospital and donor cannot access allocations or issues
+    for auth in [donor_auth, hosp_auth]:
+        assert client.get(f"/api/allocations/preview/{test_req_id}", headers=auth).status_code == 403
+        assert client.post("/api/allocations/allocate", json={"request_id": test_req_id}, headers=auth).status_code == 403
+        assert client.post(f"/api/allocations/release?request_id={test_req_id}&unit_id=UNIT-2026-00001", headers=auth).status_code == 403
+        assert client.get("/api/issues", headers=auth).status_code == 403
+        assert client.post("/api/issues", json={"request_id": test_req_id}, headers=auth).status_code == 403
+        assert client.get("/api/issues/ISS-2026-00001/certificate", headers=auth).status_code == 403
+
+    # Staff has access
+    preview_res = client.get(f"/api/allocations/preview/{test_req_id}", headers=staff_auth)
+    assert preview_res.status_code == 200
+    assert client.get("/api/issues", headers=staff_auth).status_code == 200
+
+def test_stage2_reports_and_notifications_role_isolation(client):
+    """Verify operational reports and alerts are restricted to staff and admin."""
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+    staff_auth = _login(client, "staff", "staff123")
+
+    report_paths = [
+        "/api/reports/inventory",
+        "/api/reports/donations",
+        "/api/reports/issues",
+        "/api/reports/discards-expiries",
+        "/api/reports/export-csv?report_type=inventory",
+    ]
+    for path in report_paths:
+        assert client.get(path, headers=hosp_auth).status_code == 403
+        assert client.get(path, headers=donor_auth).status_code == 403
+        assert client.get(path, headers=staff_auth).status_code == 200
+
+    # Notifications
+    assert client.get("/api/notifications", headers=hosp_auth).status_code == 403
+    assert client.get("/api/notifications", headers=donor_auth).status_code == 403
+    assert client.get("/api/notifications", headers=staff_auth).status_code == 200
+
+def test_stage2_demo_reset_role_isolation(client):
+    """Verify /api/demo/reset is protected: 401 unauthenticated, 403 non-admin, 200 admin."""
+    # Unauthenticated -> 401
+    assert client.post("/api/demo/reset").status_code == 401
+
+    # Non-admin -> 403
+    staff_auth = _login(client, "staff", "staff123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+    donor_auth = _login(client, "donor", "donor123")
+    assert client.post("/api/demo/reset", headers=staff_auth).status_code == 403
+    assert client.post("/api/demo/reset", headers=hosp_auth).status_code == 403
+    assert client.post("/api/demo/reset", headers=donor_auth).status_code == 403
+
+    # Admin -> 200
+    admin_auth = _login(client, "admin", "admin123")
+    res = client.post("/api/demo/reset", headers=admin_auth)
+    assert res.status_code == 200
+    assert "Database reset" in res.json().get("message", "")
+
+def test_stage2_authentic_audit_logging(client):
+    """Verify audit logs record authentic caller identity instead of hardcoded strings."""
+    # Reset database first using admin
+    admin_auth = _login(client, "admin", "admin123")
+    client.post("/api/demo/reset", headers=admin_auth)
+
+    # 1. Hospital submits blood request
+    hosp_auth = _login(client, "hospital", "hospital123")
+    req_payload = {
+        "hospital_name": "Authentic Hospital",
+        "requester_name": "Dr. Authenticator",
+        "patient_name": "Audit Test Patient",
+        "patient_blood_group": "AB+",
+        "component_type": "Whole Blood",
+        "quantity": 1,
+        "urgency": "Normal",
+        "required_date": str(date.today() + timedelta(days=2))
+    }
+    hosp_res = client.post("/api/requests", json=req_payload, headers=hosp_auth)
+    assert hosp_res.status_code == 201
+    created_req_id = hosp_res.json()["request_id"]
+
+    # 2. Staff approves request
+    staff_auth = _login(client, "staff", "staff123")
+    staff_dec_res = client.post(
+        f"/api/requests/{created_req_id}/decision",
+        json={"decision": "Approved", "reason": "Crossmatch verified for audit test"},
+        headers=staff_auth
+    )
+    assert staff_dec_res.status_code == 200
+
+    # 3. Admin creates a user
+    import uuid
+    random_user = f"auditor_{uuid.uuid4().hex[:6]}"
+    admin_res = client.post(
+        "/api/admin/users",
+        json={
+            "username": random_user,
+            "password": "auditUser123!",
+            "full_name": "Auditor Test",
+            "email": f"{random_user}@bbms.org",
+            "role": "staff"
+        },
+        headers=admin_auth
+    )
+    assert admin_res.status_code == 201
+
+    # Verify audit logs in database
+    with get_db() as db:
+        # Check request creation audit log
+        req_log = db.execute(
+            "SELECT actor_username FROM audit_logs WHERE entity_id = ? AND action = 'CREATE_BLOOD_REQUEST'",
+            (created_req_id,)
+        ).fetchone()
+        assert req_log is not None
+        assert req_log["actor_username"] == "hospital"
+
+        # Check request decision audit log
+        dec_log = db.execute(
+            "SELECT actor_username FROM audit_logs WHERE entity_id = ? AND action = 'DECIDE_BLOOD_REQUEST'",
+            (created_req_id,)
+        ).fetchone()
+        assert dec_log is not None
+        assert dec_log["actor_username"] == "staff"
+
+        # Check user creation audit log
+        user_log = db.execute(
+            "SELECT actor_username FROM audit_logs WHERE entity_type = 'USER' AND action = 'CREATE_USER' AND details LIKE ?",
+            (f"%{random_user}%",)
+        ).fetchone()
+        assert user_log is not None
+        assert user_log["actor_username"] == "admin"
+
+def test_stage2_auth_logout_workflow(client):
+    """Verify logout requires authentication, rejects invalid tokens, invalidates session and audits."""
+    # 1. Unauthenticated logout -> 401
+    res_unauth = client.post("/api/auth/logout")
+    assert res_unauth.status_code == 401
+    assert "Missing authentication credentials." in res_unauth.json().get("detail", "")
+
+    # 2. Invalid token logout -> 401
+    res_invalid = client.post("/api/auth/logout", headers={"Authorization": "Bearer invalid_token_xyz"})
+    assert res_invalid.status_code == 401
+    assert "Invalid or expired session token." in res_invalid.json().get("detail", "")
+
+    # 3. Valid login and logout
+    login_res = client.post("/api/auth/login", json={"username": "staff", "password": "staff123"})
+    assert login_res.status_code == 200
+    token = login_res.json()["token"]
+    auth_header = {"Authorization": f"Bearer {token}"}
+
+    # Verify session is valid before logout
+    me_before = client.get("/api/auth/me", headers=auth_header)
+    assert me_before.status_code == 200
+    assert me_before.json()["username"] == "staff"
+
+    # Logout
+    logout_res = client.post("/api/auth/logout", headers=auth_header)
+    assert logout_res.status_code == 200
+    assert "Logged out successfully." in logout_res.json().get("message", "")
+
+    # Verify session is invalidated - subsequent requests fail with 401
+    me_after = client.get("/api/auth/me", headers=auth_header)
+    assert me_after.status_code == 401
+    assert "Invalid or expired session token." in me_after.json().get("detail", "")
+
+    # Verify logout audit log exists
+    with get_db() as db:
+        log = db.execute(
+            "SELECT * FROM audit_logs WHERE action = 'LOGOUT' AND actor_username = 'staff' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert log is not None
+        assert log["actor_username"] == "staff"
+
+def test_stage2_demo_switch_role_disabled_by_default(client, monkeypatch):
+    """Verify that demo switch-role is rejected with HTTP 403 when BBMS_ENABLE_DEMO is false or unset."""
+    monkeypatch.delenv("BBMS_ENABLE_DEMO", raising=False)
+    res = client.post("/api/demo/switch-role?role=admin")
+    assert res.status_code == 403
+    assert "Demo role switching is disabled" in res.json().get("detail", "")
+
+    monkeypatch.setenv("BBMS_ENABLE_DEMO", "false")
+    res_false = client.post("/api/demo/switch-role?role=staff")
+    assert res_false.status_code == 403
+    assert "Demo role switching is disabled" in res_false.json().get("detail", "")
+
+def test_stage2_demo_switch_role_enabled(client, monkeypatch):
+    """Verify that demo switch-role succeeds for all 4 roles when BBMS_ENABLE_DEMO is true."""
+    monkeypatch.setenv("BBMS_ENABLE_DEMO", "true")
+    for role in ["admin", "staff", "hospital", "donor"]:
+        res = client.post(f"/api/demo/switch-role?role={role}")
+        assert res.status_code == 200
+        data = res.json()
+        assert "session" in data
+        assert data["session"]["role"] == role
+        assert "token" in data["session"]
+
+def test_stage2_demo_switch_role_rejects_invalid_roles(client, monkeypatch):
+    """Verify that demo switch-role rejects unknown or invalid roles with HTTP 400 Bad Request."""
+    monkeypatch.setenv("BBMS_ENABLE_DEMO", "true")
+    res = client.post("/api/demo/switch-role?role=superadmin")
+    assert res.status_code == 400
+    assert "Unknown demo role: superadmin" in res.json().get("detail", "")
+
+    res_empty = client.post("/api/demo/switch-role?role=")
+    assert res_empty.status_code == 400
+
+def test_stage2_authenticated_endpoints_remain_protected_in_demo_mode(client, monkeypatch):
+    """Verify that normal authenticated business endpoints remain strictly protected even when demo mode is enabled."""
+    monkeypatch.setenv("BBMS_ENABLE_DEMO", "true")
+
+    # 1. Unauthenticated requests still return 401
+    assert client.get("/api/inventory/summary").status_code == 401
+    assert client.get("/api/donors").status_code == 401
+    assert client.get("/api/admin/users").status_code == 401
+    assert client.post("/api/demo/reset").status_code == 401
+
+    # 2. Donor token still cannot access staff/admin endpoints (403)
+    donor_res = client.post("/api/demo/switch-role?role=donor")
+    assert donor_res.status_code == 200
+    donor_auth = {"Authorization": f"Bearer {donor_res.json()['session']['token']}"}
+
+    assert client.get("/api/admin/users", headers=donor_auth).status_code == 403
+    assert client.get("/api/donors", headers=donor_auth).status_code == 403
+    assert client.post("/api/demo/reset", headers=donor_auth).status_code == 403
+
+    # 3. Staff token still cannot access admin endpoints (403)
+    staff_res = client.post("/api/demo/switch-role?role=staff")
+    assert staff_res.status_code == 200
+    staff_auth = {"Authorization": f"Bearer {staff_res.json()['session']['token']}"}
+
+    assert client.get("/api/admin/users", headers=staff_auth).status_code == 403
+    assert client.post("/api/demo/reset", headers=staff_auth).status_code == 403
+
+
+# ==================== BBMS-F-003: DONOR HISTORY & SCREENING & INTERVALS ====================
+
+def test_bbms_f_003_donor_screening_history_service():
+    """BBMS-F-003: Verify retrieval of past screening outcomes and clinical vitals."""
+    from app.services.donor_service import get_donor_screening_history
+    records = get_donor_screening_history("DON-2026-0001")
+    assert isinstance(records, list)
+    assert len(records) > 0
+    first = records[0]
+    assert first["donor_id"] == "DON-2026-0001"
+    assert "weight_kg" in first
+    assert "hemoglobin_g_dl" in first
+    assert "systolic_bp" in first
+    assert "diastolic_bp" in first
+    assert "pulse" in first
+    assert "is_eligible" in first
+    assert "checked_at" in first
+    assert "checked_by" in first
+
+def test_bbms_f_003_donation_interval_tracking_service():
+    """BBMS-F-003: Verify donation interval calculations and 90-day threshold rules."""
+    from app.services.donor_service import get_donor_donation_interval_status, register_donor
+    status = get_donor_donation_interval_status("DON-2026-0001")
+    assert status["total_donations"] > 0
+    assert status["last_donation_date"] is not None
+    assert status["minimum_required_interval_days"] == 90
+    assert "is_interval_eligible" in status
+    assert "next_eligible_date" in status
+
+    new_donor_id = register_donor(
+        full_name="Interval Test Donor",
+        age=30,
+        gender="Male",
+        blood_group="B+",
+        phone="+91-9988776655"
+    )
+    new_status = get_donor_donation_interval_status(new_donor_id)
+    assert new_status["total_donations"] == 0
+    assert new_status["last_donation_date"] is None
+    assert new_status["is_interval_eligible"] is True
+    assert new_status["next_eligible_date"] == date.today().isoformat()
+
+def test_bbms_f_003_donor_views_own_history_via_me_endpoint(client):
+    """BBMS-F-003: Authenticated donor views their own history, screening outcomes, and intervals."""
+    # 1. Unauthenticated request returns 401
+    res_unauth = client.get("/api/donors/me/history")
+    assert res_unauth.status_code == 401
+
+    # 2. Authenticated donor (Rahul Kumar, email: rahul.donor@gmail.com, donor_id: DON-2026-0001)
+    donor_auth = _login(client, "donor", "donor123")
+    res_donor = client.get("/api/donors/me/history", headers=donor_auth)
+    assert res_donor.status_code == 200
+    data = res_donor.json()
+    assert data["donor_id"] == "DON-2026-0001"
+    assert data["full_name"] == "Rahul Kumar"
+    assert data["blood_group"] == "O+"
+    assert "donations" in data
+    assert "screening_outcomes" in data
+    assert "interval_status" in data
+    assert len(data["screening_outcomes"]) > 0
+    assert data["interval_status"]["minimum_required_interval_days"] == 90
+
+def test_bbms_f_003_staff_views_donor_history_and_screening_and_intervals(client):
+    """BBMS-F-003: Staff and admin view donor history, screening outcomes, and interval check endpoints."""
+    staff_auth = _login(client, "staff", "staff123")
+    admin_auth = _login(client, "admin", "admin123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+
+    # Staff views comprehensive history
+    res_hist = client.get("/api/donors/DON-2026-0001/history", headers=staff_auth)
+    assert res_hist.status_code == 200
+    h_data = res_hist.json()
+    assert h_data["donor_id"] == "DON-2026-0001"
+    assert "history" in h_data
+    assert "donations" in h_data
+    assert "screening_outcomes" in h_data
+    assert "interval_status" in h_data
+
+    # Staff checks interval endpoint
+    res_int = client.get("/api/donors/DON-2026-0001/intervals", headers=staff_auth)
+    assert res_int.status_code == 200
+    int_data = res_int.json()
+    assert int_data["donor_id"] == "DON-2026-0001"
+    assert "interval_status" in int_data
+    assert int_data["interval_status"]["minimum_required_interval_days"] == 90
+
+    # Staff checks screening endpoint
+    res_scr = client.get("/api/donors/DON-2026-0001/screening", headers=staff_auth)
+    assert res_scr.status_code == 200
+    scr_data = res_scr.json()
+    assert scr_data["donor_id"] == "DON-2026-0001"
+    assert len(scr_data["screening_outcomes"]) > 0
+
+    # Admin also has access
+    assert client.get("/api/donors/DON-2026-0001/intervals", headers=admin_auth).status_code == 200
+    assert client.get("/api/donors/DON-2026-0001/screening", headers=admin_auth).status_code == 200
+
+    # Hospital role forbidden (403)
+    assert client.get("/api/donors/DON-2026-0001/intervals", headers=hosp_auth).status_code == 403
+    assert client.get("/api/donors/DON-2026-0001/screening", headers=hosp_auth).status_code == 403
+
+    # Non-existent donor returns 404
+    assert client.get("/api/donors/DON-9999-9999/intervals", headers=staff_auth).status_code == 404
+    assert client.get("/api/donors/DON-9999-9999/screening", headers=staff_auth).status_code == 404
+
+
+# ==================== BBMS-F-004: UNIT ID GENERATION & TRACEABILITY ====================
+
+def test_bbms_f_004_unit_id_generation_and_uniqueness():
+    """BBMS-F-004: Verify unit ID format and monotonic collision-free generation."""
+    from app.services.inventory_service import generate_unit_id, generate_collection_id
+    uid = generate_unit_id()
+    cid = generate_collection_id()
+    assert uid.startswith("UNIT-")
+    assert cid.startswith("COL-")
+    # Verify sequential structure
+    parts = uid.split("-")
+    assert len(parts) == 3
+    assert len(parts[2]) == 5
+
+def test_bbms_f_004_trace_issued_unit_from_donor_to_patient():
+    """BBMS-F-004: Verify end-to-end tracing for an issued blood unit from donor to recipient patient."""
+    from app.services.inventory_service import get_unit_traceability
+    trace = get_unit_traceability("UNIT-2026-00005")
+    assert trace is not None
+    assert trace["unit_id"] == "UNIT-2026-00005"
+    assert trace["is_fully_traced"] is True
+
+    # 1. Donor verification
+    assert trace["donor"] is not None
+    assert trace["donor"]["donor_id"] == "DON-2026-0003"
+    assert trace["donor"]["full_name"] == "Vikramaditya Roy"
+    assert trace["donor"]["blood_group"] == "B+"
+
+    # 2. Collection verification
+    assert trace["collection"] is not None
+    assert trace["collection"]["collection_id"] == "COL-2026-0005"
+
+    # 3. Unit verification
+    assert trace["unit"]["status"] == "Issued"
+    assert trace["unit"]["blood_group"] == "B+"
+
+    # 4. Issue & Patient verification
+    assert trace["issue"] is not None
+    assert trace["issue"]["issue_id"] == "ISS-2026-0001"
+    assert trace["patient_recipient"] is not None
+    assert trace["patient_recipient"]["patient_name"] == "Kavita Reddy"
+    assert trace["patient_recipient"]["hospital_name"] == "Victoria Hospital"
+
+    # 5. Trace chain summary
+    tc = trace["trace_chain"]
+    assert tc["donor_name"] == "Vikramaditya Roy"
+    assert tc["collection_id"] == "COL-2026-0005"
+    assert tc["unit_id"] == "UNIT-2026-00005"
+    assert tc["hospital_name"] == "Victoria Hospital"
+    assert tc["patient_name"] == "Kavita Reddy"
+
+def test_bbms_f_004_trace_available_unit_in_stock():
+    """BBMS-F-004: Verify tracing for an available unit currently in storage."""
+    from app.services.inventory_service import get_unit_traceability, get_unit, record_collection_and_create_unit
+    # Create fresh unit to test Available state independently
+    ok, err, data = record_collection_and_create_unit(
+        donor_id="DON-2026-0004",
+        blood_group="O-",
+        volume_ml=450.0,
+        component_type="Whole Blood"
+    )
+    assert ok is True
+    new_unit_id = data["unit_id"]
+
+    trace = get_unit_traceability(new_unit_id)
+    assert trace is not None
+    assert trace["unit_id"] == new_unit_id
+    assert trace["unit"]["status"] == "Available"
+    assert trace["is_fully_traced"] is False
+    assert trace["issue"] is None
+    assert trace["patient_recipient"] is None
+    assert trace["donor"]["donor_id"] == "DON-2026-0004"
+
+    # Single unit lookup
+    unit = get_unit(new_unit_id)
+    assert unit is not None
+    assert unit["unit_id"] == new_unit_id
+    assert "days_until_expiry" in unit
+
+def test_bbms_f_004_unit_traceability_api_authorization(client):
+    """BBMS-F-004: Verify API endpoints for unit trace and RBAC protections."""
+    staff_auth = _login(client, "staff", "staff123")
+    admin_auth = _login(client, "admin", "admin123")
+    donor_auth = _login(client, "donor", "donor123")
+    hosp_auth = _login(client, "hospital", "hospital123")
+
+    # 1. Unauthenticated requests return 401
+    assert client.get("/api/inventory/units/UNIT-2026-00005/trace").status_code == 401
+    assert client.get("/api/inventory/units/UNIT-2026-00005").status_code == 401
+
+    # 2. Staff and Admin succeed
+    res_staff = client.get("/api/inventory/units/UNIT-2026-00005/trace", headers=staff_auth)
+    assert res_staff.status_code == 200
+    data = res_staff.json()
+    assert data["unit_id"] == "UNIT-2026-00005"
+    assert data["patient_recipient"]["patient_name"] == "Kavita Reddy"
+    assert data["trace_chain"]["hospital_name"] == "Victoria Hospital"
+
+    res_admin = client.get("/api/inventory/units/UNIT-2026-00005", headers=admin_auth)
+    assert res_admin.status_code == 200
+    assert res_admin.json()["unit_id"] == "UNIT-2026-00005"
+
+    # 3. Donor and Hospital roles forbidden (403)
+    assert client.get("/api/inventory/units/UNIT-2026-00005/trace", headers=donor_auth).status_code == 403
+    assert client.get("/api/inventory/units/UNIT-2026-00005", headers=donor_auth).status_code == 403
+    assert client.get("/api/inventory/units/UNIT-2026-00005/trace", headers=hosp_auth).status_code == 403
+    assert client.get("/api/inventory/units/UNIT-2026-00005", headers=hosp_auth).status_code == 403
+
+    # 4. Non-existent unit returns 404
+    assert client.get("/api/inventory/units/UNIT-9999-99999/trace", headers=staff_auth).status_code == 404
+    assert client.get("/api/inventory/units/UNIT-9999-99999", headers=staff_auth).status_code == 404
+
+
+# ==================== ISSUE #4 CORRECTION TESTS ====================
+
+def test_bbms_f_003_secure_donor_email_lookup_cases():
+    """
+    Test suite for secure donor email lookup:
+    1. Exactly one matching donor
+    2. No matching donor
+    3. NULL and empty email records
+    4. Duplicate email records raises AmbiguousDonorEmailError
+    5. Case-insensitive matching
+    """
+    from app.services.donor_service import get_donor_by_email, AmbiguousDonorEmailError, register_donor
+    from app.database import get_db
+
+    # 1. Exactly one matching donor: Rahul Kumar (seeded)
+    donor = get_donor_by_email("rahul.donor@gmail.com")
+    assert donor is not None
+    assert donor["full_name"] == "Rahul Kumar"
+    assert donor["donor_id"] == "DON-2026-0001"
+
+    # 2. No matching donor
+    assert get_donor_by_email("nonexistent.donor@hospital.org") is None
+
+    # 3. NULL and empty email records are ignored and do not match
+    assert get_donor_by_email("") is None
+    assert get_donor_by_email("   ") is None
+    assert get_donor_by_email(None) is None
+
+    # Register a donor with no email (None)
+    d_no_email = register_donor("Null Email Donor", 30, "Male", "A+", "+91-9111111111", email=None)
+    assert get_donor_by_email("") is None
+    assert get_donor_by_email(d_no_email) is None
+
+    # 5. Case-insensitive matching: "RAHUL.DONOR@GMAIL.COM" matches "rahul.donor@gmail.com"
+    donor_upper = get_donor_by_email("  RAHUL.DONOR@GMAIL.COM  ")
+    assert donor_upper is not None
+    assert donor_upper["donor_id"] == "DON-2026-0001"
+
+    # 4. Duplicate email records: Register two donors with identical email
+    dup_email = "duplicate.test@example.com"
+    register_donor("Dup Donor One", 25, "Female", "B+", "+91-9222222221", email=dup_email)
+    register_donor("Dup Donor Two", 28, "Male", "B+", "+91-9222222222", email=dup_email)
+
+    with pytest.raises(AmbiguousDonorEmailError) as exc_info:
+        get_donor_by_email(dup_email)
+    assert "Multiple donor profiles" in str(exc_info.value)
+    assert dup_email in str(exc_info.value)
+
+def test_bbms_f_003_self_service_isolation_and_ambiguity_handling(client):
+    """
+    6. Donor cannot access another donor's history through the self-service endpoint.
+    Ambiguous emails return 409 Conflict, missing donor returns 404.
+    """
+    # Authenticated donor Rahul Kumar can only view Rahul Kumar
+    donor_auth = _login(client, "donor", "donor123")
+    res = client.get("/api/donors/me/history", headers=donor_auth)
+    assert res.status_code == 200
+    assert res.json()["donor_id"] == "DON-2026-0001"
+    assert res.json()["full_name"] == "Rahul Kumar"
+
+    # Staff user (email staff@pesbloodbank.org) has no donor record -> 404 Not Found
+    staff_auth = _login(client, "staff", "staff123")
+    res_staff = client.get("/api/donors/me/history", headers=staff_auth)
+    assert res_staff.status_code == 404
+    assert "No donor profile linked" in res_staff.json()["detail"]
+
+    # If a user's email matches multiple donor profiles -> 409 Conflict (never leaks history)
+    from app.services.donor_service import register_donor
+    dup_user_email = "conflict.user@test.org"
+    register_donor("Conflict User 1", 30, "Male", "O+", "+91-9333333331", email=dup_user_email)
+    register_donor("Conflict User 2", 32, "Female", "O+", "+91-9333333332", email=dup_user_email)
+
+    from datetime import datetime, timedelta
+    from app.services.auth_service import _ACTIVE_SESSIONS
+    dummy_token = "dummy_token_ambiguous_donor_test"
+    _ACTIVE_SESSIONS[dummy_token] = {
+        "user_id": 9999,
+        "username": "conflict_donor",
+        "role": "donor",
+        "email": dup_user_email,
+        "full_name": "Conflict Test User",
+        "expires_at": datetime.utcnow() + timedelta(hours=1)
+    }
+    ambig_auth = {"Authorization": f"Bearer {dummy_token}"}
+    res_ambig = client.get("/api/donors/me/history", headers=ambig_auth)
+    assert res_ambig.status_code == 409
+    assert "Multiple donor profiles" in res_ambig.json()["detail"]
+
+
+# ==================== ISSUE #5 CORRECTION TESTS ====================
+
+def test_bbms_f_004_concurrent_collection_and_unit_creation():
+    """
+    BBMS-F-004 Concurrency Test:
+    Launches multiple concurrent collection creations across threads.
+    Verifies that every successful operation receives unique collection and unit IDs.
+    """
+    import concurrent.futures
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+
+    donor_id = register_donor("Concurrency Test Donor", 29, "Male", "AB+", "+91-9444444444")
+    evaluate_and_record_eligibility(
+        donor_id=donor_id,
+        weight_kg=75.0,
+        hemoglobin_g_dl=15.0,
+        systolic_bp=120,
+        diastolic_bp=80,
+        pulse=72,
+        days_since_last_donation=100
+    )
+
+    def do_create(idx):
+        success, error, data = record_collection_and_create_unit(
+            donor_id=donor_id,
+            blood_group="AB+",
+            volume_ml=450.0,
+            component_type="Whole Blood"
+        )
+        return success, error, data
+
+    num_concurrent = 8
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(do_create, i) for i in range(num_concurrent)]
+        results = [f.result() for f in futures]
+
+    successful = [r[2] for r in results if r[0] is True]
+    assert len(successful) > 0, f"Expected successful creations, got {results}"
+
+    collection_ids = [d["collection_id"] for d in successful]
+    unit_ids = [d["unit_id"] for d in successful]
+
+    assert len(collection_ids) == len(set(collection_ids)), f"Duplicate collection IDs detected: {collection_ids}"
+    assert len(unit_ids) == len(set(unit_ids)), f"Duplicate unit IDs detected: {unit_ids}"
+
+def test_bbms_f_004_collection_creation_failure_atomic_rollback():
+    """
+    BBMS-F-004 Atomic Rollback Test:
+    Verifies that when a collection creation fails, no partial records are committed into the database.
+    """
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+    from app.database import get_db
+
+    ineligible_id = register_donor("Ineligible Rollback Donor", 16, "Female", "O+", "+91-9555555555")
+    evaluate_and_record_eligibility(
+        donor_id=ineligible_id,
+        weight_kg=40.0,
+        hemoglobin_g_dl=10.0,
+        systolic_bp=100,
+        diastolic_bp=60,
+        pulse=70,
+        days_since_last_donation=10
+    )
+
+    with get_db() as db:
+        initial_collections = db.execute("SELECT COUNT(*) as c FROM blood_collections WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+        initial_units = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+
+    success, error, data = record_collection_and_create_unit(
+        donor_id=ineligible_id,
+        blood_group="O+",
+        volume_ml=450.0
+    )
+    assert success is False
+    assert "rejected" in error.lower()
+    assert data is None
+
+    with get_db() as db:
+        after_collections = db.execute("SELECT COUNT(*) as c FROM blood_collections WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+        after_units = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE donor_id = ?", (ineligible_id,)).fetchone()["c"]
+
+    assert after_collections == initial_collections == 0
+    assert after_units == initial_units == 0

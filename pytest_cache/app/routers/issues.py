@@ -1,23 +1,28 @@
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional
 from app.models import IssueRequest
 from app.services.issue_service import (
     issue_blood_units_for_request, get_issue_certificate, list_issue_transactions
 )
+from app.routers.auth import require_roles
 
 router = APIRouter(prefix="/api/issues", tags=["Issues & Dispatch"])
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def issue_units(payload: IssueRequest, request: Request):
+def issue_units(
+    payload: IssueRequest,
+    request: Request,
+    current_user: dict = Depends(require_roles(["staff", "admin"]))
+):
     """
     Issue blood units for an approved request (BBMS-F-013, BBMS-F-014, BBMS-F-015).
-    Blocks issue of expired, quarantined, or unavailable units.
+    Blocks issue of expired, quarantined, or unavailable units. Staff and Admin only.
     """
     client_ip = request.client.host if request.client else "127.0.0.1"
     success, error, issued_records = issue_blood_units_for_request(
         request_id=payload.request_id,
         verification_notes=payload.verification_notes or "Standard pre-transfusion crossmatch verified.",
-        actor_username="staff",
+        actor_username=current_user["username"],
         ip_address=client_ip
     )
     if not success:
@@ -31,14 +36,15 @@ def issue_units(payload: IssueRequest, request: Request):
 @router.get("")
 def get_issues(
     hospital: Optional[str] = Query(None),
-    search: Optional[str] = Query(None)
+    search: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
-    """Searchable & filterable issue transactions (BBMS-F-014, BBMS-F-016)."""
+    """Searchable & filterable issue transactions (BBMS-F-014, BBMS-F-016). Staff and Admin only."""
     return list_issue_transactions(query=search, hospital=hospital)
 
 @router.get("/{issue_id}/certificate")
-def get_certificate(issue_id: str):
-    """Retrieve printable issue certificate / dispatch voucher (BBMS-F-014)."""
+def get_certificate(issue_id: str, current_user: dict = Depends(require_roles(["staff", "admin"]))):
+    """Retrieve printable issue certificate / dispatch voucher (BBMS-F-014). Staff and Admin only."""
     cert = get_issue_certificate(issue_id)
     if not cert:
         raise HTTPException(status_code=404, detail=f"Issue certificate {issue_id} not found.")

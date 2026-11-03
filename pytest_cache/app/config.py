@@ -9,6 +9,15 @@ SECRET_KEY = "blood-bank-management-system-pes-2026-secret-key"
 ALGORITHM = "HS256"
 SESSION_EXPIRY_HOURS = 24
 
+# Demo & Evaluation Mode Configuration
+# Defaults to False for secure production RBAC enforcement.
+# Set BBMS_ENABLE_DEMO=true in development/evaluation environment to enable quick role-switching.
+def is_demo_mode_enabled() -> bool:
+    """Return whether demo mode is explicitly enabled via BBMS_ENABLE_DEMO environment variable."""
+    return os.getenv("BBMS_ENABLE_DEMO", "false").lower() in ("true", "1", "yes")
+
+ENABLE_DEMO_MODE = is_demo_mode_enabled()
+
 # Shelf life in days per component type
 COMPONENT_SHELF_LIFE_DAYS = {
     "Whole Blood": 35,

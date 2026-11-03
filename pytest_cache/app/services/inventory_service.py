@@ -1,20 +1,50 @@
+import sqlite3
+import time
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from app.database import get_db
 from app.config import COMPONENT_SHELF_LIFE_DAYS, LOW_STOCK_THRESHOLD
 from app.services.donor_service import is_donor_currently_eligible
 
-def generate_collection_id() -> str:
+def generate_collection_id(db=None) -> str:
     year = datetime.utcnow().year
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) as c FROM blood_collections WHERE collection_id LIKE ?", (f"COL-{year}-%",)).fetchone()["c"]
-        return f"COL-{year}-{count + 1:04d}"
+    if db is not None:
+        rows = db.execute("SELECT collection_id FROM blood_collections WHERE collection_id LIKE ? ORDER BY collection_id DESC", (f"COL-{year}-%",)).fetchall()
+        max_num = 0
+        for r in rows:
+            try:
+                num = int(r["collection_id"].split("-")[-1])
+                if num > max_num:
+                    max_num = num
+            except (ValueError, IndexError):
+                pass
+        if max_num == 0:
+            count = db.execute("SELECT COUNT(*) as c FROM blood_collections WHERE collection_id LIKE ?", (f"COL-{year}-%",)).fetchone()["c"]
+            max_num = count
+        return f"COL-{year}-{max_num + 1:04d}"
 
-def generate_unit_id() -> str:
+    with get_db() as db_conn:
+        return generate_collection_id(db=db_conn)
+
+def generate_unit_id(db=None) -> str:
     year = datetime.utcnow().year
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE unit_id LIKE ?", (f"UNIT-{year}-%",)).fetchone()["c"]
-        return f"UNIT-{year}-{count + 1:05d}"
+    if db is not None:
+        rows = db.execute("SELECT unit_id FROM blood_units WHERE unit_id LIKE ? ORDER BY unit_id DESC", (f"UNIT-{year}-%",)).fetchall()
+        max_num = 0
+        for r in rows:
+            try:
+                num = int(r["unit_id"].split("-")[-1])
+                if num > max_num:
+                    max_num = num
+            except (ValueError, IndexError):
+                pass
+        if max_num == 0:
+            count = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE unit_id LIKE ?", (f"UNIT-{year}-%",)).fetchone()["c"]
+            max_num = count
+        return f"UNIT-{year}-{max_num + 1:05d}"
+
+    with get_db() as db_conn:
+        return generate_unit_id(db=db_conn)
 
 def record_collection_and_create_unit(
     donor_id: str,
@@ -24,11 +54,13 @@ def record_collection_and_create_unit(
     collection_dt: Optional[date] = None,
     storage_location: str = "Main Cold Storage Bay-1",
     actor_username: str = "staff",
-    ip_address: str = "127.0.0.1"
+    ip_address: str = "127.0.0.1",
+    max_retries: int = 5
 ) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
     """
     Atomic creation of blood collection and unique blood unit (BBMS-F-004, BBMS-F-005, BBMS-F-015).
     Enforces eligibility verification before acceptance (BBMS-F-002).
+    Employs bounded retry handling for collision-free concurrent ID allocation.
     """
     # 1. Enforce donor eligibility check
     is_eligible, reason = is_donor_currently_eligible(donor_id)
@@ -41,59 +73,80 @@ def record_collection_and_create_unit(
     shelf_days = COMPONENT_SHELF_LIFE_DAYS.get(component_type, 35)
     expiry_dt = collection_dt + timedelta(days=shelf_days)
 
-    collection_id = generate_collection_id()
-    unit_id = generate_unit_id()
+    for attempt in range(max_retries):
+        try:
+            with get_db() as db:
+                collection_id = generate_collection_id(db=db)
+                unit_id = generate_unit_id(db=db)
 
-    with get_db() as db:
-        # Insert collection record
-        db.execute(
-            """
-            INSERT INTO blood_collections (collection_id, donor_id, blood_group, volume_ml, collection_date, status, collected_by)
-            VALUES (?, ?, ?, ?, ?, 'Completed', ?)
-            """,
-            (collection_id, donor_id, blood_group, volume_ml, collection_dt.isoformat(), actor_username)
-        )
+                # Insert collection record
+                db.execute(
+                    """
+                    INSERT INTO blood_collections (collection_id, donor_id, blood_group, volume_ml, collection_date, status, collected_by)
+                    VALUES (?, ?, ?, ?, ?, 'Completed', ?)
+                    """,
+                    (collection_id, donor_id, blood_group, volume_ml, collection_dt.isoformat(), actor_username)
+                )
 
-        # Insert blood unit record
-        db.execute(
-            """
-            INSERT INTO blood_units (
-                unit_id, collection_id, donor_id, blood_group, component_type,
-                volume_ml, collection_date, expiry_date, status, storage_location
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Available', ?)
-            """,
-            (unit_id, collection_id, donor_id, blood_group, component_type, volume_ml,
-             collection_dt.isoformat(), expiry_dt.isoformat(), storage_location)
-        )
+                # Insert blood unit record
+                db.execute(
+                    """
+                    INSERT INTO blood_units (
+                        unit_id, collection_id, donor_id, blood_group, component_type,
+                        volume_ml, collection_date, expiry_date, status, storage_location
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Available', ?)
+                    """,
+                    (unit_id, collection_id, donor_id, blood_group, component_type, volume_ml,
+                     collection_dt.isoformat(), expiry_dt.isoformat(), storage_location)
+                )
 
-        # Insert unit status log
-        db.execute(
-            """
-            INSERT INTO unit_status_logs (unit_id, previous_status, new_status, reason, changed_by)
-            VALUES (?, 'None', 'Available', 'Initial collection and processing', ?)
-            """,
-            (unit_id, actor_username)
-        )
+                # Insert unit status log
+                db.execute(
+                    """
+                    INSERT INTO unit_status_logs (unit_id, previous_status, new_status, reason, changed_by)
+                    VALUES (?, 'None', 'Available', 'Initial collection and processing', ?)
+                    """,
+                    (unit_id, actor_username)
+                )
 
-        # Audit log
-        db.execute(
-            """
-            INSERT INTO audit_logs (actor_username, actor_role, action, entity_type, entity_id, details, ip_address)
-            VALUES (?, 'staff', 'CREATE_BLOOD_UNIT', 'BLOOD_UNIT', ?, ?, ?)
-            """,
-            (actor_username, unit_id, f"Created unit {unit_id} ({blood_group} {component_type}), expires {expiry_dt}", ip_address)
-        )
+                # Audit log
+                db.execute(
+                    """
+                    INSERT INTO audit_logs (actor_username, actor_role, action, entity_type, entity_id, details, ip_address)
+                    VALUES (?, 'staff', 'CREATE_BLOOD_UNIT', 'BLOOD_UNIT', ?, ?, ?)
+                    """,
+                    (actor_username, unit_id, f"Created unit {unit_id} ({blood_group} {component_type}), expires {expiry_dt}", ip_address)
+                )
 
-    return True, None, {
-        "collection_id": collection_id,
-        "unit_id": unit_id,
-        "blood_group": blood_group,
-        "component_type": component_type,
-        "collection_date": collection_dt.isoformat(),
-        "expiry_date": expiry_dt.isoformat(),
-        "status": "Available"
-    }
+            return True, None, {
+                "collection_id": collection_id,
+                "unit_id": unit_id,
+                "blood_group": blood_group,
+                "component_type": component_type,
+                "collection_date": collection_dt.isoformat(),
+                "expiry_date": expiry_dt.isoformat(),
+                "status": "Available"
+            }
+
+        except sqlite3.IntegrityError as e:
+            err_msg = str(e).lower()
+            if "blood_collections.collection_id" in err_msg or "blood_units.unit_id" in err_msg or ("primary key" in err_msg and ("blood_collections" in err_msg or "blood_units" in err_msg)):
+                if attempt < max_retries - 1:
+                    time.sleep(0.01 * (attempt + 1))
+                    continue
+                return False, f"Failed to allocate unique unit/collection ID after {max_retries} attempts: {e}", None
+            return False, f"Database integrity error: {e}", None
+
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                if attempt < max_retries - 1:
+                    time.sleep(0.02 * (attempt + 1))
+                    continue
+                return False, "Database busy during collection registration. Please retry.", None
+            raise
+
+    return False, "Failed to record collection and create unit due to repeated collisions.", None
 
 def update_unit_status(
     unit_id: str,
@@ -278,3 +331,116 @@ def list_blood_units(
             d["is_expired"] = diff_days < 0
             results.append(d)
         return results
+
+
+def get_unit(unit_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve single blood unit record with days until expiry (BBMS-F-004, BBMS-F-016)."""
+    with get_db() as db:
+        row = db.execute("SELECT * FROM blood_units WHERE unit_id = ?", (unit_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        today = date.today()
+        exp_d = datetime.strptime(d["expiry_date"], "%Y-%m-%d").date()
+        diff_days = (exp_d - today).days
+        d["days_until_expiry"] = diff_days
+        d["is_expired"] = diff_days < 0
+        return d
+
+def get_unit_traceability(unit_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Trace blood unit from donor to patient (BBMS-F-004).
+    Aggregates unit metadata, donor info, collection details,
+    status change history, allocation, request, and issue transaction.
+    """
+    with get_db() as db:
+        unit_row = db.execute("SELECT * FROM blood_units WHERE unit_id = ?", (unit_id,)).fetchone()
+        if not unit_row:
+            return None
+        unit = dict(unit_row)
+
+        # Donor details
+        donor_row = db.execute("SELECT * FROM donors WHERE donor_id = ?", (unit["donor_id"],)).fetchone()
+        donor = dict(donor_row) if donor_row else None
+
+        # Collection details
+        coll_row = None
+        if unit.get("collection_id"):
+            coll_row = db.execute("SELECT * FROM blood_collections WHERE collection_id = ?", (unit["collection_id"],)).fetchone()
+        collection = dict(coll_row) if coll_row else None
+
+        # Status transition history
+        status_logs = db.execute(
+            "SELECT previous_status, new_status, reason, changed_by, timestamp FROM unit_status_logs WHERE unit_id = ? ORDER BY timestamp ASC, id ASC",
+            (unit_id,)
+        ).fetchall()
+        lifecycle_events = [dict(r) for r in status_logs]
+
+        # Allocation details
+        alloc_row = db.execute(
+            "SELECT * FROM allocations WHERE unit_id = ? ORDER BY allocated_at DESC LIMIT 1",
+            (unit_id,)
+        ).fetchone()
+        allocation = dict(alloc_row) if alloc_row else None
+
+        # Issue transaction details
+        issue_row = db.execute(
+            "SELECT * FROM issue_transactions WHERE unit_id = ? ORDER BY issue_timestamp DESC LIMIT 1",
+            (unit_id,)
+        ).fetchone()
+        issue = dict(issue_row) if issue_row else None
+
+        # Blood Request details (via issue or allocation)
+        request_id = None
+        if issue and issue.get("request_id"):
+            request_id = issue["request_id"]
+        elif allocation and allocation.get("request_id"):
+            request_id = allocation["request_id"]
+
+        request = None
+        if request_id:
+            req_row = db.execute("SELECT * FROM blood_requests WHERE request_id = ?", (request_id,)).fetchone()
+            request = dict(req_row) if req_row else None
+
+        # Patient & Hospital recipient summary
+        patient_recipient = None
+        if issue:
+            patient_recipient = {
+                "patient_name": issue["patient_name"],
+                "hospital_name": issue["hospital_name"],
+                "issue_id": issue["issue_id"],
+                "issued_at": str(issue["issue_timestamp"]),
+                "issuing_staff": issue["issuing_staff"],
+                "verification_notes": issue.get("verification_notes")
+            }
+        elif request:
+            patient_recipient = {
+                "patient_name": request["patient_name"],
+                "hospital_name": request["hospital_name"],
+                "patient_blood_group": request["patient_blood_group"],
+                "status": "Reserved / Allocated (Pending Dispatch)"
+            }
+
+        return {
+            "unit_id": unit_id,
+            "unit": unit,
+            "donor": donor,
+            "collection": collection,
+            "allocation": allocation,
+            "request": request,
+            "issue": issue,
+            "patient_recipient": patient_recipient,
+            "lifecycle_events": lifecycle_events,
+            "is_fully_traced": issue is not None,
+            "trace_chain": {
+                "donor_id": donor["donor_id"] if donor else None,
+                "donor_name": donor["full_name"] if donor else None,
+                "collection_id": collection["collection_id"] if collection else None,
+                "collection_date": collection["collection_date"] if collection else None,
+                "unit_id": unit_id,
+                "unit_status": unit["status"],
+                "hospital_name": patient_recipient["hospital_name"] if patient_recipient else None,
+                "patient_name": patient_recipient["patient_name"] if patient_recipient else None,
+                "issue_id": issue["issue_id"] if issue else None
+            }
+        }

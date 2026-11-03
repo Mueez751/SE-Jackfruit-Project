@@ -1,16 +1,21 @@
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional
 from app.models import BloodRequestCreate, BloodRequestDecision
 from app.services.request_service import (
     create_blood_request, record_request_decision,
     get_blood_request, list_blood_requests
 )
+from app.routers.auth import require_roles
 
 router = APIRouter(prefix="/api/requests", tags=["Blood Requests"])
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def submit_blood_request(payload: BloodRequestCreate, request: Request):
-    """Create blood request with validation and priority (BBMS-F-009, BBMS-F-010)."""
+def submit_blood_request(
+    payload: BloodRequestCreate,
+    request: Request,
+    current_user: dict = Depends(require_roles(["hospital", "staff", "admin"]))
+):
+    """Create blood request with validation and priority (BBMS-F-009, BBMS-F-010). Hospital, Staff, Admin."""
     client_ip = request.client.host if request.client else "127.0.0.1"
     success, error, req_id = create_blood_request(
         hospital_name=payload.hospital_name,
@@ -21,7 +26,7 @@ def submit_blood_request(payload: BloodRequestCreate, request: Request):
         quantity=payload.quantity,
         urgency=payload.urgency,
         required_date=payload.required_date,
-        actor_username="hospital",
+        actor_username=current_user["username"],
         ip_address=client_ip
     )
     if not success:
@@ -36,9 +41,10 @@ def get_requests(
     status: Optional[str] = Query(None),
     urgency: Optional[str] = Query(None),
     hospital: Optional[str] = Query(None),
-    search: Optional[str] = Query(None)
+    search: Optional[str] = Query(None),
+    current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
-    """Searchable & filterable requests ordered by urgency (BBMS-F-016)."""
+    """Searchable & filterable requests ordered by urgency (BBMS-F-016). Staff and Admin only."""
     return list_blood_requests(
         status=status,
         urgency=urgency,
@@ -47,21 +53,27 @@ def get_requests(
     )
 
 @router.get("/{request_id}")
-def get_single_request(request_id: str):
+def get_single_request(request_id: str, current_user: dict = Depends(require_roles(["staff", "admin"]))):
+    """View individual blood request details. Staff and Admin only."""
     req = get_blood_request(request_id)
     if not req:
         raise HTTPException(status_code=404, detail=f"Request {request_id} not found.")
     return req
 
 @router.post("/{request_id}/decision")
-def make_request_decision(request_id: str, payload: BloodRequestDecision, request: Request):
-    """Approve, reject, or place on hold a blood request (BBMS-F-011)."""
+def make_request_decision(
+    request_id: str,
+    payload: BloodRequestDecision,
+    request: Request,
+    current_user: dict = Depends(require_roles(["staff", "admin"]))
+):
+    """Approve, reject, or place on hold a blood request (BBMS-F-011). Staff and Admin only."""
     client_ip = request.client.host if request.client else "127.0.0.1"
     success, error = record_request_decision(
         request_id=request_id,
         decision=payload.decision,
         reason=payload.reason,
-        actor_username="staff",
+        actor_username=current_user["username"],
         ip_address=client_ip
     )
     if not success:
