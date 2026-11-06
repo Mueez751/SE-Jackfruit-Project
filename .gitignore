@@ -1,3 +1,14 @@
 .pytest_cache/
 __pycache__/
 *.py[cod]
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment variables
+.env
