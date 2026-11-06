@@ -193,7 +193,7 @@ def update_unit_status(
         )
 
     return True, None
-    def auto_mark_expired_units() -> int:
+def auto_mark_expired_units() -> int:
     """
     Automatically mark blood units as expired when expiry date is reached (BBMS-F-007).
     Prevents their issue and triggers notification.
