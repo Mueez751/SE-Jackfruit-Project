@@ -39,28 +39,7 @@ def issue_blood_units_for_request(
         if not alloc_rows:
             return False, f"No units are currently allocated to request {request_id}. Please allocate units before issuing.", []
 
-        # Verify each unit before issuing (BBMS-F-013)
-        units_to_issue = []
-        for a in alloc_rows:
-            uid = a["unit_id"]
-            u = db.execute("SELECT * FROM blood_units WHERE unit_id = ?", (uid,)).fetchone()
-            if not u:
-                return False, f"Allocated unit {uid} does not exist in inventory.", []
-
-            if u["status"] == "Expired" or u["expiry_date"] < today_str:
-                return False, f"BLOCKED: Unit {uid} is EXPIRED (expired on {u['expiry_date']}). Issue is prohibited by safety policy.", []
-
-            if u["status"] == "Quarantined":
-                return False, f"BLOCKED: Unit {uid} is QUARANTINED. Issue is prohibited.", []
-
-            if u["status"] == "Discarded":
-                return False, f"BLOCKED: Unit {uid} is marked as DISCARDED. Issue is prohibited.", []
-
-            if u["status"] == "Issued":
-                return False, f"BLOCKED: Unit {uid} has ALREADY BEEN ISSUED.", []
-
-            units_to_issue.append((a["allocation_id"], u))
-
+       
         # Perform atomic issue transactions
         issued_records = []
         now_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
