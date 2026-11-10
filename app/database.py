@@ -74,26 +74,6 @@ def init_db():
     );
     """)
 
-    # 5. Blood Units
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS blood_units (
-        unit_id TEXT PRIMARY KEY,
-        collection_id TEXT,
-        donor_id TEXT NOT NULL,
-        blood_group TEXT NOT NULL,
-        component_type TEXT NOT NULL,
-        volume_ml REAL NOT NULL,
-        collection_date DATE NOT NULL,
-        expiry_date DATE NOT NULL,
-        status TEXT NOT NULL DEFAULT 'Available' CHECK(status IN ('Available', 'Quarantined', 'Reserved', 'Issued', 'Expired', 'Discarded')),
-        storage_location TEXT DEFAULT 'Main Cold Storage Bay-1',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (collection_id) REFERENCES blood_collections(collection_id) ON DELETE SET NULL,
-        FOREIGN KEY (donor_id) REFERENCES donors(donor_id) ON DELETE RESTRICT
-    );
-    """)
-
     # 6. Unit Status Logs
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS unit_status_logs (
