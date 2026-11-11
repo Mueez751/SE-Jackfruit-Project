@@ -448,12 +448,50 @@ def test_tc_report_01_generate_reports_and_csv(client):
     assert res_disc.status_code == 200
     assert "text/csv" in res_disc.headers.get("content-type", "")
 
-def test_tc_notif_01_notifications():
-    """TC-Notif-01 (BBMS-F-018): System creates notifications for low stock and upcoming expiry."""
+def test_tc_notif_01_notifications(client):
+    """TC-Notif-01 (BBMS-F-018): System creates real-time alerts for low stock, nearing expiry, and urgent requests."""
+    staff_auth = _login(client, "staff", "staff123")
+
+    # 1. Verify low stock and nearing expiry alerts are detected
     alerts = list_notifications()
     assert isinstance(alerts, list)
-    # Alerts must be present due to low stock in some blood groups or upcoming expiries
     assert len(alerts) > 0
+
+    alert_types = {a["alert_type"] for a in alerts}
+    assert "Low_Stock" in alert_types
+
+    # 2. Verify urgent request triggers real-time urgent request notification
+    ok, err, urg_req_id = create_blood_request(
+        hospital_name="Manipal Emergency Care",
+        requester_name="Dr. Emergency",
+        patient_name="Critically Injured Patient",
+        patient_blood_group="AB-",
+        component_type="Whole Blood",
+        quantity=2,
+        urgency="Emergency"
+    )
+    assert ok is True
+
+    # Scan and list notifications
+    updated_alerts = list_notifications()
+    urg_alerts = [a for a in updated_alerts if "Urgent_Request" in a["alert_type"] and urg_req_id in a["message"]]
+    assert len(urg_alerts) > 0
+    assert urg_alerts[0]["severity"] == "Critical"
+
+    # 3. Test mark single notification as read via service and API
+    first_id = alerts[0]["id"]
+    res_read = client.post(f"/api/notifications/{first_id}/read", headers=staff_auth)
+    assert res_read.status_code == 200
+
+    # 4. Test mark all as read
+    res_all = client.post("/api/notifications/read-all", headers=staff_auth)
+    assert res_all.status_code == 200
+
+    unread = list_notifications(unread_only=True)
+    # Any new alerts generated during scan; prior marked should be read (is_read=1)
+    with get_db() as db:
+        old_read_status = db.execute("SELECT is_read FROM inventory_alerts WHERE id = ?", (first_id,)).fetchone()
+        assert old_read_status["is_read"] == 1
 
 # ==================== SECURITY & NON-FUNCTIONAL TESTS ====================
 
