@@ -120,11 +120,46 @@ def test_tc_collection_01_and_02_create_unit():
     assert (exp_dt - coll_dt).days == 35
 
 def test_tc_inv_01_maintain_inventory_counts():
-    """TC-Inv-01 (BBMS-F-006): Inventory totals reflect real-time counts."""
+    """TC-Inv-01 (BBMS-F-006): Inventory totals reflect real-time counts and full stock matrix."""
     summary = get_inventory_summary()
     assert summary["total_units"] > 0
     assert summary["available_units"] >= 0
     assert "O+" in summary["group_totals"]
+    assert "stock_matrix" in summary
+    assert "O+" in summary["stock_matrix"]
+    assert "Whole Blood" in summary["stock_matrix"]["O+"]
+    assert "component_totals" in summary
+    assert "Whole Blood" in summary["component_totals"]
+
+    # Verify live stock counts reflect changes when unit is collected, quarantined, or discarded
+    initial_avail = summary["available_units"]
+    initial_matrix_count = summary["stock_matrix"]["O-"]["Whole Blood"]
+
+    # 1. Collect a unit -> counts must increase in real-time
+    ok, err, udata = record_collection_and_create_unit(
+        donor_id="DON-2026-0004",
+        blood_group="O-",
+        component_type="Whole Blood"
+    )
+    assert ok is True
+    uid = udata["unit_id"]
+
+    after_coll = get_inventory_summary()
+    assert after_coll["available_units"] == initial_avail + 1
+    assert after_coll["stock_matrix"]["O-"]["Whole Blood"] == initial_matrix_count + 1
+
+    # 2. Quarantine unit -> available counts must decrease
+    update_unit_status(uid, "Quarantined", "Routine inspection hold")
+    after_quar = get_inventory_summary()
+    assert after_quar["available_units"] == initial_avail
+    assert after_quar["stock_matrix"]["O-"]["Whole Blood"] == initial_matrix_count
+    assert after_quar["quarantined_units"] >= 1
+
+    # 3. Discard unit -> counts must reflect discarded
+    update_unit_status(uid, "Discarded", "Expired or hemolyzed")
+    after_disc = get_inventory_summary()
+    assert after_disc["available_units"] == initial_avail
+    assert after_disc["discarded_units"] >= 1
 
 def test_tc_inv_02_auto_mark_expired_and_block_issue():
     """TC-Inv-02 (BBMS-F-007) & TC-Alloc-02 (BBMS-F-013): Auto-mark expired unit and block issue."""
