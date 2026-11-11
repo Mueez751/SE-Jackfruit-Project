@@ -1,3 +1,4 @@
+# BBMS-F-011: Request Approval Workflow with Rationale - Assigned to Nandan Kumar K R
 # BBMS-F-010: Request Validation - Assigned to Mueez Ahmed
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any, Tuple
@@ -89,6 +90,9 @@ def record_request_decision(
     valid_decisions = ["Approved", "Rejected", "On_Hold"]
     if decision not in valid_decisions:
         return False, f"Invalid decision: {decision}. Must be one of {valid_decisions}"
+
+    if not reason or not str(reason).strip():
+        return False, "Written rationale is mandatory for recording a request decision."
 
     now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 

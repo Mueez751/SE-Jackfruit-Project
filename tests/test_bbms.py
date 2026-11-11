@@ -225,8 +225,8 @@ def test_tc_req_02_reject_invalid_request():
     assert "invalid blood group" in error.lower()
 
 def test_tc_req_03_approve_and_hold_decision():
-    """TC-Req-03 (BBMS-F-011): Request status and decision history updated."""
-    # Create request and approve it
+    """TC-Req-03 (BBMS-F-011): Request status and decision history updated (Approve, Reject, On_Hold with rationale)."""
+    # 1. Create request and put on hold with written rationale
     _, _, req_id = create_blood_request(
         hospital_name="St. Martha Hospital",
         requester_name="Dr. Alice",
@@ -236,17 +236,61 @@ def test_tc_req_03_approve_and_hold_decision():
         quantity=1,
         urgency="Normal"
     )
-    success, error = record_request_decision(
+    hold_ok, hold_err = record_request_decision(
+        request_id=req_id,
+        decision="On_Hold",
+        reason="Pending secondary antibody screen and crossmatch verification"
+    )
+    assert hold_ok is True
+
+    with get_db() as db:
+        req = db.execute("SELECT status, decision_reason, decision_by FROM blood_requests WHERE request_id = ?", (req_id,)).fetchone()
+        assert req["status"] == "On_Hold"
+        assert "antibody screen" in req["decision_reason"]
+
+    # 2. Re-evaluate from On_Hold to Approved with updated rationale
+    appr_ok, appr_err = record_request_decision(
         request_id=req_id,
         decision="Approved",
-        reason="Crossmatch verified and stock confirmed"
+        reason="Secondary screen cleared, crossmatch verified and stock confirmed"
     )
-    assert success is True
+    assert appr_ok is True
 
     with get_db() as db:
         req = db.execute("SELECT status, decision_reason FROM blood_requests WHERE request_id = ?", (req_id,)).fetchone()
         assert req["status"] == "Approved"
-        assert "Crossmatch verified" in req["decision_reason"]
+        assert "Secondary screen cleared" in req["decision_reason"]
+
+    # 3. Create another request and reject it with recorded rationale
+    _, _, req_id2 = create_blood_request(
+        hospital_name="Victoria Hospital",
+        requester_name="Dr. Suresh",
+        patient_name="Pooja Sharma",
+        patient_blood_group="B-",
+        component_type="Platelets",
+        quantity=2,
+        urgency="Normal"
+    )
+    rej_ok, rej_err = record_request_decision(
+        request_id=req_id2,
+        decision="Rejected",
+        reason="Clinical indication outside transfusion guideline criteria"
+    )
+    assert rej_ok is True
+
+    with get_db() as db:
+        req2 = db.execute("SELECT status, decision_reason FROM blood_requests WHERE request_id = ?", (req_id2,)).fetchone()
+        assert req2["status"] == "Rejected"
+        assert "transfusion guideline" in req2["decision_reason"]
+
+    # 4. Blank rationale is rejected
+    fail_ok, fail_err = record_request_decision(
+        request_id=req_id,
+        decision="Approved",
+        reason="   "
+    )
+    assert fail_ok is False
+    assert "rationale" in fail_err.lower()
 
 def test_tc_alloc_01_fefo_allocation_strategy():
     """TC-Alloc-01 (BBMS-F-012): Allocation selects earliest expiring eligible unit (FEFO)."""
