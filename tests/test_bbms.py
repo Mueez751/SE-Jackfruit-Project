@@ -340,6 +340,66 @@ def test_tc_issue_01_record_blood_issue():
         u = db.execute("SELECT status FROM blood_units WHERE unit_id = 'UNIT-2026-00001'").fetchone()
         assert u["status"] == "Issued"
 
+
+def test_tc_search_01_searchable_and_filterable_records(client):
+    """TC-Search-01 (BBMS-F-016): Multi-parameter search and filtering across donors, units, and requests."""
+    staff_auth = _login(client, "staff", "staff123")
+
+    # 1. Donors: Search and filter
+    # Search by name query
+    res_d_name = client.get("/api/donors?search=Rahul", headers=staff_auth)
+    assert res_d_name.status_code == 200
+    donors_name = res_d_name.json()
+    assert any(d["full_name"] == "Rahul Kumar" for d in donors_name)
+
+    # Filter by blood group
+    res_d_bg = client.get("/api/donors?blood_group=O+", headers=staff_auth)
+    assert res_d_bg.status_code == 200
+    assert all(d["blood_group"] == "O+" for d in res_d_bg.json())
+
+    # Filter by gender
+    res_d_gen = client.get("/api/donors?gender=Female", headers=staff_auth)
+    assert res_d_gen.status_code == 200
+    assert all(d["gender"] == "Female" for d in res_d_gen.json())
+
+    # 2. Blood Units: Search and filter
+    # Filter by status and blood group
+    res_u_avail = client.get("/api/inventory/units?status=Available&blood_group=O+", headers=staff_auth)
+    assert res_u_avail.status_code == 200
+    units = res_u_avail.json()
+    assert all(u["status"] == "Available" and u["blood_group"] == "O+" for u in units)
+
+    # Filter by component type
+    res_u_comp = client.get("/api/inventory/units?component_type=Whole+Blood", headers=staff_auth)
+    assert res_u_comp.status_code == 200
+    assert all(u["component_type"] == "Whole Blood" for u in res_u_comp.json())
+
+    # Search by Unit ID
+    res_u_id = client.get("/api/inventory/units?search=UNIT-2026-00001", headers=staff_auth)
+    assert res_u_id.status_code == 200
+    assert any(u["unit_id"] == "UNIT-2026-00001" for u in res_u_id.json())
+
+    # Filter by collection date range
+    res_u_date = client.get(f"/api/inventory/units?from_date=2026-01-01&to_date=2026-12-31", headers=staff_auth)
+    assert res_u_date.status_code == 200
+    assert len(res_u_date.json()) > 0
+
+    # 3. Blood Requests: Search and filter
+    # Search by hospital name query
+    res_r_hosp = client.get("/api/requests?search=Apollo", headers=staff_auth)
+    assert res_r_hosp.status_code == 200
+    assert all("Apollo" in (r["hospital_name"] + r["patient_name"] + r["request_id"] + r.get("requester_name", "")) for r in res_r_hosp.json())
+
+    # Filter by urgency
+    res_r_urg = client.get("/api/requests?urgency=Urgent", headers=staff_auth)
+    assert res_r_urg.status_code == 200
+    assert all(r["urgency"] == "Urgent" for r in res_r_urg.json())
+
+    # Filter by blood group and status
+    res_r_bg = client.get("/api/requests?blood_group=B+&status=Pending", headers=staff_auth)
+    assert res_r_bg.status_code == 200
+    assert all(r["patient_blood_group"] == "B+" and r["status"] == "Pending" for r in res_r_bg.json())
+
 def test_tc_report_01_generate_reports_and_csv():
     """TC-Report-01 (BBMS-F-017): Selected report generated with correct records & CSV."""
     inv_rep = generate_inventory_report()

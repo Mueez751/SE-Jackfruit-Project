@@ -1,3 +1,4 @@
+# BBMS-F-016: Blood Request Search & Filtering - Assigned to Nandan Kumar K R
 # BBMS-F-011: Request Approval Workflow with Rationale - Assigned to Nandan Kumar K R
 # BBMS-F-010: Request Validation - Assigned to Mueez Ahmed
 from datetime import datetime, date
@@ -141,9 +142,13 @@ def list_blood_requests(
     status: Optional[str] = None,
     urgency: Optional[str] = None,
     hospital: Optional[str] = None,
+    blood_group: Optional[str] = None,
+    component_type: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     query: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """Searchable & filterable blood request records (BBMS-F-016)."""
+    """Searchable & filterable blood request records across status, priority, group, and dates (BBMS-F-016)."""
     with get_db() as db:
         sql = "SELECT * FROM blood_requests WHERE 1=1"
         params = []
@@ -156,10 +161,22 @@ def list_blood_requests(
         if hospital:
             sql += " AND hospital_name LIKE ?"
             params.append(f"%{hospital}%")
+        if blood_group:
+            sql += " AND patient_blood_group = ?"
+            params.append(blood_group)
+        if component_type:
+            sql += " AND component_type = ?"
+            params.append(component_type)
+        if from_date:
+            sql += " AND required_date >= ?"
+            params.append(from_date)
+        if to_date:
+            sql += " AND required_date <= ?"
+            params.append(to_date)
         if query:
-            sql += " AND (request_id LIKE ? OR patient_name LIKE ? OR hospital_name LIKE ?)"
+            sql += " AND (request_id LIKE ? OR patient_name LIKE ? OR hospital_name LIKE ? OR requester_name LIKE ?)"
             q_like = f"%{query}%"
-            params.extend([q_like, q_like, q_like])
+            params.extend([q_like, q_like, q_like, q_like])
 
         # Order by priority: Emergency > Urgent > Normal, then created_at DESC
         sql += """

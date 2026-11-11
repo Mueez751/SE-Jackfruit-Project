@@ -1,3 +1,4 @@
+# BBMS-F-016: Blood Unit Search & Filtering - Assigned to Nandan Kumar K R
 # BBMS-F-006: Real-time Blood Inventory Counts & Stock Matrix - Assigned to Nandan Kumar K R
 import sqlite3
 import time
@@ -318,9 +319,12 @@ def list_blood_units(
     blood_group: Optional[str] = None,
     component_type: Optional[str] = None,
     status: Optional[str] = None,
-    query: Optional[str] = None
+    query: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    expiring_before: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """Searchable & filterable blood unit records (BBMS-F-016)."""
+    """Searchable & filterable blood unit records across group, component, status, and dates (BBMS-F-016)."""
     auto_mark_expired_units()
     today = date.today()
 
@@ -336,6 +340,15 @@ def list_blood_units(
         if status:
             sql += " AND status = ?"
             params.append(status)
+        if from_date:
+            sql += " AND collection_date >= ?"
+            params.append(from_date)
+        if to_date:
+            sql += " AND collection_date <= ?"
+            params.append(to_date)
+        if expiring_before:
+            sql += " AND expiry_date <= ?"
+            params.append(expiring_before)
         if query:
             sql += " AND (unit_id LIKE ? OR donor_id LIKE ? OR storage_location LIKE ?)"
             q_like = f"%{query}%"

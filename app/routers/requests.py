@@ -1,3 +1,4 @@
+# BBMS-F-016: Blood Request Search & Filtering - Assigned to Nandan Kumar K R
 # BBMS-F-011: Request Approval Workflow with Rationale - Assigned to Nandan Kumar K R
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional
@@ -42,7 +43,11 @@ def get_requests(
     status: Optional[str] = Query(None),
     urgency: Optional[str] = Query(None),
     hospital: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    blood_group: Optional[str] = Query(None, description="Filter by recipient blood group"),
+    component_type: Optional[str] = Query(None, description="Filter by component type"),
+    from_date: Optional[str] = Query(None, description="Filter required_date >= from_date (YYYY-MM-DD)"),
+    to_date: Optional[str] = Query(None, description="Filter required_date <= to_date (YYYY-MM-DD)"),
+    search: Optional[str] = Query(None, description="Search by request ID, patient, hospital, or requester"),
     current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
     """Searchable & filterable requests ordered by urgency (BBMS-F-016). Staff and Admin only."""
@@ -50,6 +55,10 @@ def get_requests(
         status=status,
         urgency=urgency,
         hospital=hospital,
+        blood_group=blood_group,
+        component_type=component_type,
+        from_date=from_date,
+        to_date=to_date,
         query=search
     )
 

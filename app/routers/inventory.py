@@ -1,3 +1,4 @@
+# BBMS-F-016: Blood Unit Search & Filtering - Assigned to Nandan Kumar K R
 # BBMS-F-006: Real-time Blood Inventory Counts & Stock Matrix - Assigned to Nandan Kumar K R
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional
@@ -21,14 +22,20 @@ def get_units(
     component_type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    from_date: Optional[str] = Query(None, description="Filter collection date >= from_date (YYYY-MM-DD)"),
+    to_date: Optional[str] = Query(None, description="Filter collection date <= to_date (YYYY-MM-DD)"),
+    expiring_before: Optional[str] = Query(None, description="Filter expiry date <= expiring_before (YYYY-MM-DD)"),
     current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
-    """Searchable & filterable inventory units (BBMS-F-016). Staff and Admin only."""
+    """Searchable & filterable inventory units with date thresholds (BBMS-F-016). Staff and Admin only."""
     return list_blood_units(
         blood_group=blood_group,
         component_type=component_type,
         status=status,
-        query=search
+        query=search,
+        from_date=from_date,
+        to_date=to_date,
+        expiring_before=expiring_before
     )
 
 @router.get("/units/{unit_id}/trace")

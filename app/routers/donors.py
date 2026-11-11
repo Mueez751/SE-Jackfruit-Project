@@ -1,3 +1,4 @@
+# BBMS-F-016: Searchable and Filterable Donor Registry - Assigned to Nandan Kumar K R
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import Optional, List
 from app.models import DonorCreate, EligibilityCheckRequest
@@ -34,11 +35,13 @@ def create_donor(payload: DonorCreate, request: Request, current_user: dict = De
 
 @router.get("")
 def get_donors(
-    search: Optional[str] = Query(None, description="Search by name, ID, or phone"),
+    search: Optional[str] = Query(None, description="Search by name, ID, phone, or email"),
     blood_group: Optional[str] = Query(None, description="Filter by blood group"),
+    gender: Optional[str] = Query(None, description="Filter by gender (Male, Female, Other)"),
     current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
-    return list_donors(query=search, blood_group=blood_group)
+    """Searchable & filterable donor directory (BBMS-F-016). Staff and Admin only."""
+    return list_donors(query=search, blood_group=blood_group, gender=gender)
 
 @router.get("/me/history")
 def get_my_donor_history(current_user: dict = Depends(get_current_active_user)):
