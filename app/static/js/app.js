@@ -539,7 +539,7 @@ async function loadRequests() {
         <td><span class="badge ${urgBadge}">${r.urgency}</span></td>
         <td><span class="badge ${statusBadge}">${r.status}</span></td>
         <td>
-          ${r.status === 'Pending' ? `
+          ${(r.status === 'Pending' || r.status === 'On_Hold') ? `
             <button class="btn btn-sm btn-primary" onclick="openDecisionModal('${r.request_id}')">Decide</button>
           ` : ''}
           ${r.status === 'Approved' ? `

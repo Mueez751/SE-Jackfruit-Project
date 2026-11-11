@@ -1,9 +1,11 @@
+# BBMS-F-016: Blood Unit Search & Filtering - Assigned to Nandan Kumar K R
+# BBMS-F-006: Real-time Blood Inventory Counts & Stock Matrix - Assigned to Nandan Kumar K R
 import sqlite3
 import time
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 from app.database import get_db
-from app.config import COMPONENT_SHELF_LIFE_DAYS, LOW_STOCK_THRESHOLD
+from app.config import COMPONENT_SHELF_LIFE_DAYS, LOW_STOCK_THRESHOLD, BLOOD_GROUPS, COMPONENT_TYPES
 from app.services.donor_service import is_donor_currently_eligible
 
 def generate_collection_id(db=None) -> str:
@@ -251,6 +253,11 @@ def get_inventory_summary() -> Dict[str, Any]:
         expired_units = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE status = 'Expired'").fetchone()["c"]
         discarded_units = db.execute("SELECT COUNT(*) as c FROM blood_units WHERE status = 'Discarded'").fetchone()["c"]
 
+        # Initialize full 2D stock matrix for all blood groups and component types (BBMS-F-006)
+        stock_matrix: Dict[str, Dict[str, int]] = {
+            bg: {comp: 0 for comp in COMPONENT_TYPES} for bg in BLOOD_GROUPS
+        }
+
         # Matrix: Blood Group x Component for Available units
         matrix_rows = db.execute(
             """
@@ -261,7 +268,6 @@ def get_inventory_summary() -> Dict[str, Any]:
             """
         ).fetchall()
 
-        stock_matrix: Dict[str, Dict[str, int]] = {}
         for r in matrix_rows:
             bg = r["blood_group"]
             comp = r["component_type"]
@@ -270,8 +276,9 @@ def get_inventory_summary() -> Dict[str, Any]:
                 stock_matrix[bg] = {}
             stock_matrix[bg][comp] = cnt
 
-        # Group totals for Available
-        group_totals = db.execute(
+        # Group totals for Available (all 8 blood groups initialized)
+        group_totals: Dict[str, int] = {bg: 0 for bg in BLOOD_GROUPS}
+        rows = db.execute(
             """
             SELECT blood_group, COUNT(*) as count
             FROM blood_units
@@ -279,6 +286,21 @@ def get_inventory_summary() -> Dict[str, Any]:
             GROUP BY blood_group
             """
         ).fetchall()
+        for r in rows:
+            group_totals[r["blood_group"]] = r["count"]
+
+        # Component totals for Available (all component types initialized)
+        component_totals: Dict[str, int] = {comp: 0 for comp in COMPONENT_TYPES}
+        c_rows = db.execute(
+            """
+            SELECT component_type, COUNT(*) as count
+            FROM blood_units
+            WHERE status = 'Available'
+            GROUP BY component_type
+            """
+        ).fetchall()
+        for r in c_rows:
+            component_totals[r["component_type"]] = r["count"]
 
         return {
             "total_units": total_units,
@@ -289,16 +311,20 @@ def get_inventory_summary() -> Dict[str, Any]:
             "expired_units": expired_units,
             "discarded_units": discarded_units,
             "stock_matrix": stock_matrix,
-            "group_totals": {r["blood_group"]: r["count"] for r in group_totals}
+            "group_totals": group_totals,
+            "component_totals": component_totals
         }
 
 def list_blood_units(
     blood_group: Optional[str] = None,
     component_type: Optional[str] = None,
     status: Optional[str] = None,
-    query: Optional[str] = None
+    query: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    expiring_before: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """Searchable & filterable blood unit records (BBMS-F-016)."""
+    """Searchable & filterable blood unit records across group, component, status, and dates (BBMS-F-016)."""
     auto_mark_expired_units()
     today = date.today()
 
@@ -314,6 +340,15 @@ def list_blood_units(
         if status:
             sql += " AND status = ?"
             params.append(status)
+        if from_date:
+            sql += " AND collection_date >= ?"
+            params.append(from_date)
+        if to_date:
+            sql += " AND collection_date <= ?"
+            params.append(to_date)
+        if expiring_before:
+            sql += " AND expiry_date <= ?"
+            params.append(expiring_before)
         if query:
             sql += " AND (unit_id LIKE ? OR donor_id LIKE ? OR storage_location LIKE ?)"
             q_like = f"%{query}%"

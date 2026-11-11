@@ -1,3 +1,4 @@
+# BBMS-F-016: Searchable and Filterable Donor Registry - Assigned to Nandan Kumar K R
 # BBMS-F-001: Donor Registration - Assigned to Mueez Ahmed
 # BBMS-F-002: Donor Eligibility Screening - Assigned to Mueez Ahmed
 # BBMS-F-003: Donation History Tracking - Assigned to Mueez Ahmed
@@ -162,17 +163,25 @@ def get_donor(donor_id: str) -> Optional[Dict[str, Any]]:
         res["last_donation_date"] = colls["last_d"] if colls else None
         return res
 
-def list_donors(query: Optional[str] = None, blood_group: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_donors(
+    query: Optional[str] = None,
+    blood_group: Optional[str] = None,
+    gender: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Searchable & filterable donor records by group, gender, or text query (BBMS-F-016)."""
     with get_db() as db:
         sql = "SELECT * FROM donors WHERE 1=1"
         params = []
         if blood_group:
             sql += " AND blood_group = ?"
             params.append(blood_group)
+        if gender:
+            sql += " AND gender = ?"
+            params.append(gender)
         if query:
-            sql += " AND (full_name LIKE ? OR donor_id LIKE ? OR phone LIKE ?)"
+            sql += " AND (full_name LIKE ? OR donor_id LIKE ? OR phone LIKE ? OR email LIKE ? OR address LIKE ?)"
             q_like = f"%{query}%"
-            params.extend([q_like, q_like, q_like])
+            params.extend([q_like, q_like, q_like, q_like, q_like])
         sql += " ORDER BY created_at DESC"
         rows = db.execute(sql, params).fetchall()
 

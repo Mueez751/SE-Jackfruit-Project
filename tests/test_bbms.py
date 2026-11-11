@@ -120,11 +120,46 @@ def test_tc_collection_01_and_02_create_unit():
     assert (exp_dt - coll_dt).days == 35
 
 def test_tc_inv_01_maintain_inventory_counts():
-    """TC-Inv-01 (BBMS-F-006): Inventory totals reflect real-time counts."""
+    """TC-Inv-01 (BBMS-F-006): Inventory totals reflect real-time counts and full stock matrix."""
     summary = get_inventory_summary()
     assert summary["total_units"] > 0
     assert summary["available_units"] >= 0
     assert "O+" in summary["group_totals"]
+    assert "stock_matrix" in summary
+    assert "O+" in summary["stock_matrix"]
+    assert "Whole Blood" in summary["stock_matrix"]["O+"]
+    assert "component_totals" in summary
+    assert "Whole Blood" in summary["component_totals"]
+
+    # Verify live stock counts reflect changes when unit is collected, quarantined, or discarded
+    initial_avail = summary["available_units"]
+    initial_matrix_count = summary["stock_matrix"]["O-"]["Whole Blood"]
+
+    # 1. Collect a unit -> counts must increase in real-time
+    ok, err, udata = record_collection_and_create_unit(
+        donor_id="DON-2026-0004",
+        blood_group="O-",
+        component_type="Whole Blood"
+    )
+    assert ok is True
+    uid = udata["unit_id"]
+
+    after_coll = get_inventory_summary()
+    assert after_coll["available_units"] == initial_avail + 1
+    assert after_coll["stock_matrix"]["O-"]["Whole Blood"] == initial_matrix_count + 1
+
+    # 2. Quarantine unit -> available counts must decrease
+    update_unit_status(uid, "Quarantined", "Routine inspection hold")
+    after_quar = get_inventory_summary()
+    assert after_quar["available_units"] == initial_avail
+    assert after_quar["stock_matrix"]["O-"]["Whole Blood"] == initial_matrix_count
+    assert after_quar["quarantined_units"] >= 1
+
+    # 3. Discard unit -> counts must reflect discarded
+    update_unit_status(uid, "Discarded", "Expired or hemolyzed")
+    after_disc = get_inventory_summary()
+    assert after_disc["available_units"] == initial_avail
+    assert after_disc["discarded_units"] >= 1
 
 def test_tc_inv_02_auto_mark_expired_and_block_issue():
     """TC-Inv-02 (BBMS-F-007) & TC-Alloc-02 (BBMS-F-013): Auto-mark expired unit and block issue."""
@@ -190,8 +225,8 @@ def test_tc_req_02_reject_invalid_request():
     assert "invalid blood group" in error.lower()
 
 def test_tc_req_03_approve_and_hold_decision():
-    """TC-Req-03 (BBMS-F-011): Request status and decision history updated."""
-    # Create request and approve it
+    """TC-Req-03 (BBMS-F-011): Request status and decision history updated (Approve, Reject, On_Hold with rationale)."""
+    # 1. Create request and put on hold with written rationale
     _, _, req_id = create_blood_request(
         hospital_name="St. Martha Hospital",
         requester_name="Dr. Alice",
@@ -201,17 +236,61 @@ def test_tc_req_03_approve_and_hold_decision():
         quantity=1,
         urgency="Normal"
     )
-    success, error = record_request_decision(
+    hold_ok, hold_err = record_request_decision(
+        request_id=req_id,
+        decision="On_Hold",
+        reason="Pending secondary antibody screen and crossmatch verification"
+    )
+    assert hold_ok is True
+
+    with get_db() as db:
+        req = db.execute("SELECT status, decision_reason, decision_by FROM blood_requests WHERE request_id = ?", (req_id,)).fetchone()
+        assert req["status"] == "On_Hold"
+        assert "antibody screen" in req["decision_reason"]
+
+    # 2. Re-evaluate from On_Hold to Approved with updated rationale
+    appr_ok, appr_err = record_request_decision(
         request_id=req_id,
         decision="Approved",
-        reason="Crossmatch verified and stock confirmed"
+        reason="Secondary screen cleared, crossmatch verified and stock confirmed"
     )
-    assert success is True
+    assert appr_ok is True
 
     with get_db() as db:
         req = db.execute("SELECT status, decision_reason FROM blood_requests WHERE request_id = ?", (req_id,)).fetchone()
         assert req["status"] == "Approved"
-        assert "Crossmatch verified" in req["decision_reason"]
+        assert "Secondary screen cleared" in req["decision_reason"]
+
+    # 3. Create another request and reject it with recorded rationale
+    _, _, req_id2 = create_blood_request(
+        hospital_name="Victoria Hospital",
+        requester_name="Dr. Suresh",
+        patient_name="Pooja Sharma",
+        patient_blood_group="B-",
+        component_type="Platelets",
+        quantity=2,
+        urgency="Normal"
+    )
+    rej_ok, rej_err = record_request_decision(
+        request_id=req_id2,
+        decision="Rejected",
+        reason="Clinical indication outside transfusion guideline criteria"
+    )
+    assert rej_ok is True
+
+    with get_db() as db:
+        req2 = db.execute("SELECT status, decision_reason FROM blood_requests WHERE request_id = ?", (req_id2,)).fetchone()
+        assert req2["status"] == "Rejected"
+        assert "transfusion guideline" in req2["decision_reason"]
+
+    # 4. Blank rationale is rejected
+    fail_ok, fail_err = record_request_decision(
+        request_id=req_id,
+        decision="Approved",
+        reason="   "
+    )
+    assert fail_ok is False
+    assert "rationale" in fail_err.lower()
 
 def test_tc_alloc_01_fefo_allocation_strategy():
     """TC-Alloc-01 (BBMS-F-012): Allocation selects earliest expiring eligible unit (FEFO)."""
@@ -260,6 +339,66 @@ def test_tc_issue_01_record_blood_issue():
     with get_db() as db:
         u = db.execute("SELECT status FROM blood_units WHERE unit_id = 'UNIT-2026-00001'").fetchone()
         assert u["status"] == "Issued"
+
+
+def test_tc_search_01_searchable_and_filterable_records(client):
+    """TC-Search-01 (BBMS-F-016): Multi-parameter search and filtering across donors, units, and requests."""
+    staff_auth = _login(client, "staff", "staff123")
+
+    # 1. Donors: Search and filter
+    # Search by name query
+    res_d_name = client.get("/api/donors?search=Rahul", headers=staff_auth)
+    assert res_d_name.status_code == 200
+    donors_name = res_d_name.json()
+    assert any(d["full_name"] == "Rahul Kumar" for d in donors_name)
+
+    # Filter by blood group
+    res_d_bg = client.get("/api/donors?blood_group=O+", headers=staff_auth)
+    assert res_d_bg.status_code == 200
+    assert all(d["blood_group"] == "O+" for d in res_d_bg.json())
+
+    # Filter by gender
+    res_d_gen = client.get("/api/donors?gender=Female", headers=staff_auth)
+    assert res_d_gen.status_code == 200
+    assert all(d["gender"] == "Female" for d in res_d_gen.json())
+
+    # 2. Blood Units: Search and filter
+    # Filter by status and blood group
+    res_u_avail = client.get("/api/inventory/units?status=Available&blood_group=O+", headers=staff_auth)
+    assert res_u_avail.status_code == 200
+    units = res_u_avail.json()
+    assert all(u["status"] == "Available" and u["blood_group"] == "O+" for u in units)
+
+    # Filter by component type
+    res_u_comp = client.get("/api/inventory/units?component_type=Whole+Blood", headers=staff_auth)
+    assert res_u_comp.status_code == 200
+    assert all(u["component_type"] == "Whole Blood" for u in res_u_comp.json())
+
+    # Search by Unit ID
+    res_u_id = client.get("/api/inventory/units?search=UNIT-2026-00001", headers=staff_auth)
+    assert res_u_id.status_code == 200
+    assert any(u["unit_id"] == "UNIT-2026-00001" for u in res_u_id.json())
+
+    # Filter by collection date range
+    res_u_date = client.get(f"/api/inventory/units?from_date=2026-01-01&to_date=2026-12-31", headers=staff_auth)
+    assert res_u_date.status_code == 200
+    assert len(res_u_date.json()) > 0
+
+    # 3. Blood Requests: Search and filter
+    # Search by hospital name query
+    res_r_hosp = client.get("/api/requests?search=Apollo", headers=staff_auth)
+    assert res_r_hosp.status_code == 200
+    assert all("Apollo" in (r["hospital_name"] + r["patient_name"] + r["request_id"] + r.get("requester_name", "")) for r in res_r_hosp.json())
+
+    # Filter by urgency
+    res_r_urg = client.get("/api/requests?urgency=Urgent", headers=staff_auth)
+    assert res_r_urg.status_code == 200
+    assert all(r["urgency"] == "Urgent" for r in res_r_urg.json())
+
+    # Filter by blood group and status
+    res_r_bg = client.get("/api/requests?blood_group=B+&status=Pending", headers=staff_auth)
+    assert res_r_bg.status_code == 200
+    assert all(r["patient_blood_group"] == "B+" and r["status"] == "Pending" for r in res_r_bg.json())
 
 def test_tc_report_01_generate_reports_and_csv():
     """TC-Report-01 (BBMS-F-017): Selected report generated with correct records & CSV."""
