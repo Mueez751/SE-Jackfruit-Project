@@ -138,25 +138,6 @@ def issue_blood_units_for_request(
 
     return True, None, issued_records
 
-def get_issue_certificate(issue_id: str) -> Optional[Dict[str, Any]]:
-    """Retrieve full dispatch certificate details for printing / verification."""
-    with get_db() as db:
-        row = db.execute(
-            """
-            SELECT i.*, u.blood_group, u.component_type, u.volume_ml, u.collection_date, u.expiry_date,
-                   r.urgency, r.requester_name, r.patient_blood_group
-            FROM issue_transactions i
-            JOIN blood_units u ON i.unit_id = u.unit_id
-            JOIN blood_requests r ON i.request_id = r.request_id
-            WHERE i.issue_id = ?
-            """,
-            (issue_id,)
-        ).fetchone()
-
-        if not row:
-            return None
-        return dict(row)
-
 def list_issue_transactions(query: Optional[str] = None, hospital: Optional[str] = None) -> List[Dict[str, Any]]:
     """Searchable issue transaction records (BBMS-F-014, BBMS-F-016)."""
     with get_db() as db:
