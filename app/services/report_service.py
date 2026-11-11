@@ -1,3 +1,4 @@
+# BBMS-F-017: Inventory, Collection, Issue, and Discard Reports with CSV Export - Assigned to Nandan Kumar K R
 import io
 import csv
 from datetime import datetime, date
@@ -78,36 +79,44 @@ def generate_discards_and_expiries_report() -> List[Dict[str, Any]]:
         ).fetchall()
         return [dict(r) for r in rows]
 
-def export_report_to_csv(report_type: str) -> str:
-    """Export selected report data to standard CSV string for spreadsheet analysis (BBMS-F-017)."""
+def export_report_to_csv(
+    report_type: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None
+) -> str:
+    """
+    Export selected report data to standard CSV string for external use and regulatory submission (BBMS-F-017).
+    Supports inventory, collections/donations, issues, and discards/expiries with optional date filtering.
+    """
     output = io.StringIO()
     writer = csv.writer(output)
+    rt = (report_type or "").strip().lower()
 
-    if report_type == "inventory":
+    if rt == "inventory":
         data = generate_inventory_report()
         writer.writerow(["Blood Group", "Component Type", "Status", "Unit Count", "Total Volume (mL)"])
         for r in data:
             writer.writerow([r["blood_group"], r["component_type"], r["status"], r["count"], r["total_volume_ml"]])
 
-    elif report_type == "donations":
-        data = generate_donations_report()
+    elif rt in ("donations", "collections"):
+        data = generate_donations_report(from_date=from_date, to_date=to_date)
         writer.writerow(["Collection ID", "Donor ID", "Donor Name", "Blood Group", "Volume (mL)", "Collection Date", "Collected By", "Unit ID", "Unit Status"])
         for r in data:
             writer.writerow([r["collection_id"], r["donor_id"], r["donor_name"], r["blood_group"], r["volume_ml"], r["collection_date"], r["collected_by"], r["unit_id"], r["unit_status"]])
 
-    elif report_type == "issues":
-        data = generate_issues_report()
+    elif rt == "issues":
+        data = generate_issues_report(from_date=from_date, to_date=to_date)
         writer.writerow(["Issue ID", "Request ID", "Unit ID", "Blood Group", "Component", "Hospital Name", "Patient Name", "Issuing Staff", "Issue Timestamp"])
         for r in data:
             writer.writerow([r["issue_id"], r["request_id"], r["unit_id"], r["blood_group"], r["component_type"], r["hospital_name"], r["patient_name"], r["issuing_staff"], r["issue_timestamp"]])
 
-    elif report_type == "discards_expiries":
+    elif rt in ("discards_expiries", "discards-expiries", "discards", "expiries"):
         data = generate_discards_and_expiries_report()
         writer.writerow(["Unit ID", "Blood Group", "Component", "Expiry Date", "Status", "Reason", "Action By", "Timestamp"])
         for r in data:
             writer.writerow([r["unit_id"], r["blood_group"], r["component_type"], r["expiry_date"], r["status"], r["reason"], r["changed_by"], r["logged_at"]])
 
     else:
-        writer.writerow(["Error", "Unknown report type"])
+        writer.writerow(["Error", f"Unknown report type: {report_type}"])
 
     return output.getvalue()

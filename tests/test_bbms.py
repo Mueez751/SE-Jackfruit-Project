@@ -21,7 +21,7 @@ from app.services.allocation_service import allocate_units_fefo, preview_fefo_ca
 from app.services.issue_service import issue_blood_units_for_request
 from app.services.report_service import (
     generate_inventory_report, generate_donations_report,
-    generate_issues_report, export_report_to_csv
+    generate_issues_report, generate_discards_and_expiries_report, export_report_to_csv
 )
 from app.services.notification_service import list_notifications
 from app.services.audit_service import list_audit_logs
@@ -400,19 +400,53 @@ def test_tc_search_01_searchable_and_filterable_records(client):
     assert res_r_bg.status_code == 200
     assert all(r["patient_blood_group"] == "B+" and r["status"] == "Pending" for r in res_r_bg.json())
 
-def test_tc_report_01_generate_reports_and_csv():
-    """TC-Report-01 (BBMS-F-017): Selected report generated with correct records & CSV."""
+def test_tc_report_01_generate_reports_and_csv(client):
+    """TC-Report-01 (BBMS-F-017): Comprehensive reports for inventory, collections, issues, discards + CSV."""
+    staff_auth = _login(client, "staff", "staff123")
+
+    # 1. Report queries
     inv_rep = generate_inventory_report()
     assert isinstance(inv_rep, list)
+    assert len(inv_rep) > 0
 
     don_rep = generate_donations_report()
     assert isinstance(don_rep, list)
+    assert len(don_rep) > 0
 
     iss_rep = generate_issues_report()
     assert isinstance(iss_rep, list)
 
-    csv_data = export_report_to_csv("inventory")
-    assert "Blood Group,Component Type,Status" in csv_data
+    disc_rep = generate_discards_and_expiries_report()
+    assert isinstance(disc_rep, list)
+
+    # 2. CSV Exports across all report types
+    inv_csv = export_report_to_csv("inventory")
+    assert "Blood Group,Component Type,Status" in inv_csv
+
+    don_csv = export_report_to_csv("donations")
+    assert "Collection ID,Donor ID,Donor Name" in don_csv
+
+    coll_csv = export_report_to_csv("collections")
+    assert "Collection ID,Donor ID,Donor Name" in coll_csv
+
+    iss_csv = export_report_to_csv("issues")
+    assert "Issue ID,Request ID,Unit ID" in iss_csv
+
+    disc_csv = export_report_to_csv("discards_expiries")
+    assert "Unit ID,Blood Group,Component" in disc_csv
+
+    # 3. CSV with date range filtering for regulatory submission
+    filtered_csv = export_report_to_csv("donations", from_date="2026-01-01", to_date="2026-12-31")
+    assert "Collection ID" in filtered_csv
+
+    # 4. REST endpoint verification
+    res_inv = client.get("/api/reports/export-csv?report_type=inventory", headers=staff_auth)
+    assert res_inv.status_code == 200
+    assert "text/csv" in res_inv.headers.get("content-type", "")
+
+    res_disc = client.get("/api/reports/export-csv?report_type=discards_expiries", headers=staff_auth)
+    assert res_disc.status_code == 200
+    assert "text/csv" in res_disc.headers.get("content-type", "")
 
 def test_tc_notif_01_notifications():
     """TC-Notif-01 (BBMS-F-018): System creates notifications for low stock and upcoming expiry."""

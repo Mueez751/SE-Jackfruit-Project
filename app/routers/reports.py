@@ -1,3 +1,4 @@
+# BBMS-F-017: Operational Reporting and CSV Export - Assigned to Nandan Kumar K R
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from typing import Optional
 from app.services.report_service import (
@@ -40,10 +41,12 @@ def report_discards_expiries(current_user: dict = Depends(require_roles(["staff"
 @router.get("/export-csv")
 def export_csv(
     report_type: str = Query(..., description="inventory, donations, issues, or discards_expiries"),
+    from_date: Optional[str] = Query(None, description="Optional start date (YYYY-MM-DD) for date-filtered reports"),
+    to_date: Optional[str] = Query(None, description="Optional end date (YYYY-MM-DD) for date-filtered reports"),
     current_user: dict = Depends(require_roles(["staff", "admin"]))
 ):
-    """Export report to CSV format. Staff and Admin only."""
-    csv_data = export_report_to_csv(report_type)
+    """Export report to CSV format for external analysis and regulatory compliance (BBMS-F-017). Staff and Admin only."""
+    csv_data = export_report_to_csv(report_type, from_date=from_date, to_date=to_date)
     filename = f"bbms_report_{report_type}.csv"
     return Response(
         content=csv_data,
