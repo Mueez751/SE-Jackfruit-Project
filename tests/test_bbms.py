@@ -1513,3 +1513,185 @@ def test_bbms_f_004_collection_creation_failure_atomic_rollback():
 
     assert after_collections == initial_collections == 0
     assert after_units == initial_units == 0
+
+
+# ==================== BBMS-F-012: FEFO BLOOD ALLOCATION TESTS ====================
+
+def test_bbms_f_012_fefo_expiry_ordering_guarantee():
+    """BBMS-F-012: Verify that FEFO allocation selects earlier expiring unit first."""
+    from app.services.allocation_service import preview_fefo_candidates, allocate_units_fefo
+    from app.services.request_service import create_blood_request, record_request_decision
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.database import get_db
+
+    # Create two units with explicit different expiry dates for A+ Whole Blood
+    today = date.today()
+    exp_early = (today + timedelta(days=5)).isoformat()
+    exp_late = (today + timedelta(days=20)).isoformat()
+
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO blood_units (unit_id, donor_id, blood_group, component_type, volume_ml, collection_date, expiry_date, status)
+            VALUES ('UNIT-FEFO-EARLY', 'DON-2026-0002', 'A+', 'Whole Blood', 450.0, ?, ?, 'Available')
+            """,
+            (today.isoformat(), exp_early)
+        )
+        db.execute(
+            """
+            INSERT INTO blood_units (unit_id, donor_id, blood_group, component_type, volume_ml, collection_date, expiry_date, status)
+            VALUES ('UNIT-FEFO-LATE', 'DON-2026-0002', 'A+', 'Whole Blood', 450.0, ?, ?, 'Available')
+            """,
+            (today.isoformat(), exp_late)
+        )
+
+    # Create and approve request for A+ Whole Blood qty 1
+    _, _, req_id = create_blood_request(
+        hospital_name="Apollo Hospital",
+        requester_name="Dr. Rao",
+        patient_name="Pooja Hegde",
+        patient_blood_group="A+",
+        component_type="Whole Blood",
+        quantity=1,
+        urgency="Normal"
+    )
+    record_request_decision(req_id, "Approved", "Pre-op allocation")
+
+    # Preview candidates - UNIT-FEFO-EARLY must appear before UNIT-FEFO-LATE
+    ok, err, candidates = preview_fefo_candidates(req_id)
+    assert ok is True
+    cand_ids = [c["unit_id"] for c in candidates]
+    assert "UNIT-FEFO-EARLY" in cand_ids
+    assert "UNIT-FEFO-LATE" in cand_ids
+    assert cand_ids.index("UNIT-FEFO-EARLY") < cand_ids.index("UNIT-FEFO-LATE")
+
+    # Allocate unit - must select earliest expiring unit
+    alloc_ok, alloc_err, alloc_ids = allocate_units_fefo(req_id)
+    assert alloc_ok is True
+    assert len(alloc_ids) == 1
+    # First candidate from the preview list must have been chosen
+    assert alloc_ids[0] == candidates[0]["unit_id"]
+
+def test_bbms_f_012_compatibility_universal_rbc_donor_o_negative():
+    """BBMS-F-012: O- serves any recipient according to biological RBC compatibility matrix."""
+    from app.services.allocation_service import get_compatible_groups, preview_fefo_candidates, allocate_units_fefo
+    from app.services.request_service import create_blood_request, record_request_decision
+    from app.database import get_db
+
+    # O- must be in compatible list for all 8 blood groups for Packed Red Cells / Whole Blood
+    for bg in ["O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"]:
+        compat = get_compatible_groups(bg, "Packed Red Cells")
+        assert "O-" in compat, f"O- must be compatible for recipient group {bg}"
+
+    # Insert dedicated O- unit
+    today = date.today()
+    exp_dt = (today + timedelta(days=12)).isoformat()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO blood_units (unit_id, donor_id, blood_group, component_type, volume_ml, collection_date, expiry_date, status)
+            VALUES ('UNIT-ONEG-TEST', 'DON-2026-0004', 'O-', 'Packed Red Cells', 350.0, ?, ?, 'Available')
+            """,
+            (today.isoformat(), exp_dt)
+        )
+
+    # B+ recipient can be served by O- unit when manual or auto allocated
+    _, _, req_id = create_blood_request(
+        hospital_name="Manipal Hospital",
+        requester_name="Dr. Suresh",
+        patient_name="B-Pos Patient",
+        patient_blood_group="B+",
+        component_type="Packed Red Cells",
+        quantity=1,
+        urgency="Emergency"
+    )
+    record_request_decision(req_id, "Approved", "Emergency shortage")
+
+    ok, _, candidates = preview_fefo_candidates(req_id)
+    assert ok is True
+    assert any(c["unit_id"] == "UNIT-ONEG-TEST" for c in candidates)
+
+    # Allocate manually
+    alloc_ok, _, alloc_ids = allocate_units_fefo(req_id, selected_unit_ids=["UNIT-ONEG-TEST"])
+    assert alloc_ok is True
+    assert "UNIT-ONEG-TEST" in alloc_ids
+
+def test_bbms_f_012_compatibility_universal_rbc_recipient_ab_positive():
+    """BBMS-F-012: AB+ can receive from all groups according to RBC compatibility matrix."""
+    from app.services.allocation_service import get_compatible_groups
+    compat = get_compatible_groups("AB+", "Whole Blood")
+    assert set(compat) == {"AB+", "AB-", "A+", "A-", "B+", "B-", "O+", "O-"}
+
+def test_bbms_f_012_incompatible_rbc_allocation_blocked():
+    """BBMS-F-012: Incompatible blood group allocation is strictly rejected."""
+    from app.services.allocation_service import allocate_units_fefo
+    from app.services.request_service import create_blood_request, record_request_decision
+    from app.database import get_db
+
+    today = date.today()
+    with get_db() as db:
+        db.execute(
+            """
+            INSERT INTO blood_units (unit_id, donor_id, blood_group, component_type, volume_ml, collection_date, expiry_date, status)
+            VALUES ('UNIT-BPOS-TEST', 'DON-2026-0003', 'B+', 'Packed Red Cells', 350.0, ?, ?, 'Available')
+            """,
+            (today.isoformat(), (today + timedelta(days=25)).isoformat())
+        )
+
+    # Create request for A+ patient
+    _, _, req_id = create_blood_request(
+        hospital_name="City Hospital",
+        requester_name="Dr. Arvind",
+        patient_name="A-Pos Patient",
+        patient_blood_group="A+",
+        component_type="Packed Red Cells",
+        quantity=1
+    )
+    record_request_decision(req_id, "Approved", "Routine surgery")
+
+    # Attempt to allocate B+ unit to A+ patient
+    ok, err, alloc_ids = allocate_units_fefo(req_id, selected_unit_ids=["UNIT-BPOS-TEST"])
+    assert ok is False
+    assert "biologically incompatible" in err.lower()
+    assert len(alloc_ids) == 0
+
+def test_bbms_f_012_plasma_reverse_compatibility_matrix():
+    """BBMS-F-012: Plasma compatibility is reverse of RBC (AB is universal donor, O is universal recipient)."""
+    from app.services.allocation_service import get_compatible_groups
+
+    # O- plasma recipient can receive plasma from any group
+    o_neg_plasma = get_compatible_groups("O-", "Fresh Frozen Plasma")
+    assert len(o_neg_plasma) == 8
+
+    # AB+ plasma recipient can only receive from AB+
+    ab_pos_plasma = get_compatible_groups("AB+", "Fresh Frozen Plasma")
+    assert ab_pos_plasma == ["AB+"]
+
+    # Cryoprecipitate follows plasma rules
+    cryo = get_compatible_groups("AB+", "Cryoprecipitate")
+    assert cryo == ["AB+"]
+
+def test_bbms_f_012_manual_allocation_validation_guards():
+    """BBMS-F-012: Manual allocation rejects duplicates and quantity mismatches."""
+    from app.services.allocation_service import allocate_units_fefo
+    from app.services.request_service import create_blood_request, record_request_decision
+
+    _, _, req_id = create_blood_request(
+        hospital_name="St. John Hospital",
+        requester_name="Dr. Kumar",
+        patient_name="Test Patient",
+        patient_blood_group="O+",
+        component_type="Whole Blood",
+        quantity=2
+    )
+    record_request_decision(req_id, "Approved", "Surgery")
+
+    # Duplicate IDs rejected
+    ok, err, _ = allocate_units_fefo(req_id, selected_unit_ids=["UNIT-2026-00001", "UNIT-2026-00001"])
+    assert ok is False
+    assert "duplicate" in err.lower()
+
+    # Quantity mismatch rejected (requested 2, supplied 1)
+    ok_qty, err_qty, _ = allocate_units_fefo(req_id, selected_unit_ids=["UNIT-2026-00001"])
+    assert ok_qty is False
+    assert "match remaining required quantity" in err_qty.lower()

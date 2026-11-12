@@ -1,22 +1,42 @@
+import sqlite3
+import time
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any, Tuple
 from app.database import get_db
 from app.config import RBC_COMPATIBILITY, PLASMA_COMPATIBILITY
 from app.services.inventory_service import auto_mark_expired_units
 
-def generate_allocation_id() -> str:
+def generate_allocation_id(db=None) -> str:
     year = datetime.utcnow().year
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) as c FROM allocations WHERE allocation_id LIKE ?", (f"ALC-{year}-%",)).fetchone()["c"]
-        return f"ALC-{year}-{count + 1:04d}"
+    if db is not None:
+        rows = db.execute(
+            "SELECT allocation_id FROM allocations WHERE allocation_id LIKE ? ORDER BY allocation_id DESC",
+            (f"ALC-{year}-%",)
+        ).fetchall()
+        max_num = 0
+        for r in rows:
+            try:
+                num = int(r["allocation_id"].split("-")[-1])
+                if num > max_num:
+                    max_num = num
+            except (ValueError, IndexError):
+                pass
+        if max_num == 0:
+            count = db.execute("SELECT COUNT(*) as c FROM allocations WHERE allocation_id LIKE ?", (f"ALC-{year}-%",)).fetchone()["c"]
+            max_num = count
+        return f"ALC-{year}-{max_num + 1:04d}"
+
+    with get_db() as db_conn:
+        return generate_allocation_id(db=db_conn)
 
 def get_compatible_groups(recipient_group: str, component_type: str) -> List[str]:
-    """Determine compatible donor groups based on component type and recipient ABO/Rh."""
+    """Determine compatible donor groups based on component type and recipient ABO/Rh (BBMS-F-012)."""
+    clean_group = recipient_group.strip()
     if component_type in ("Fresh Frozen Plasma", "Cryoprecipitate"):
-        return PLASMA_COMPATIBILITY.get(recipient_group, [recipient_group])
+        return PLASMA_COMPATIBILITY.get(clean_group, [clean_group])
     else:
         # Whole Blood, Packed Red Cells, Platelets
-        return RBC_COMPATIBILITY.get(recipient_group, [recipient_group])
+        return RBC_COMPATIBILITY.get(clean_group, [clean_group])
 
 def preview_fefo_candidates(request_id: str) -> Tuple[bool, Optional[str], List[Dict[str, Any]]]:
     """
@@ -33,22 +53,23 @@ def preview_fefo_candidates(request_id: str) -> Tuple[bool, Optional[str], List[
         if req["status"] not in ("Approved", "Pending"):
             return False, f"Request is in status '{req['status']}'. Can only allocate for Approved or Pending requests.", []
 
-        patient_group = req["patient_blood_group"]
-        component = req["component_type"]
+        patient_group = req["patient_blood_group"].strip()
+        component = req["component_type"].strip()
         qty = req["quantity"]
 
         compatible_groups = get_compatible_groups(patient_group, component)
         placeholders = ",".join("?" for _ in compatible_groups)
 
+        # FEFO order: earliest expiry first; tie-breaker prefers exact group match, then FIFO created_at
         sql = f"""
         SELECT * FROM blood_units
         WHERE status = 'Available'
           AND expiry_date >= ?
           AND component_type = ?
           AND blood_group IN ({placeholders})
-        ORDER BY expiry_date ASC, created_at ASC
+        ORDER BY expiry_date ASC, (CASE WHEN blood_group = ? THEN 0 ELSE 1 END) ASC, created_at ASC
         """
-        params = [today_str, component] + compatible_groups
+        params = [today_str, component] + compatible_groups + [patient_group]
         rows = db.execute(sql, params).fetchall()
 
         candidates = []
@@ -93,13 +114,20 @@ def allocate_units_fefo(
         if remaining_needed <= 0:
             return False, "This request has already been fully allocated.", []
 
-        patient_group = req["patient_blood_group"]
-        component = req["component_type"]
+        patient_group = req["patient_blood_group"].strip()
+        component = req["component_type"].strip()
         compatible_groups = get_compatible_groups(patient_group, component)
 
         chosen_units = []
 
         if selected_unit_ids and len(selected_unit_ids) > 0:
+            # Validate no duplicate unit IDs in manual selection
+            if len(set(selected_unit_ids)) != len(selected_unit_ids):
+                return False, "Duplicate unit IDs specified in manual allocation.", []
+
+            if len(selected_unit_ids) != remaining_needed:
+                return False, f"Selected units count ({len(selected_unit_ids)}) must match remaining required quantity ({remaining_needed}).", []
+
             # Operator manually specified units - validate each
             for uid in selected_unit_ids:
                 u = db.execute(
@@ -114,7 +142,7 @@ def allocate_units_fefo(
                     return False, f"Unit {uid} component ({u['component_type']}) does not match requested ({component}).", []
                 chosen_units.append(uid)
         else:
-            # Auto-FEFO: query earliest expiring units
+            # Auto-FEFO: query earliest expiring units with exact-match tie-breaker
             placeholders = ",".join("?" for _ in compatible_groups)
             sql = f"""
             SELECT unit_id, blood_group, expiry_date FROM blood_units
@@ -122,10 +150,10 @@ def allocate_units_fefo(
               AND expiry_date >= ?
               AND component_type = ?
               AND blood_group IN ({placeholders})
-            ORDER BY expiry_date ASC, created_at ASC
+            ORDER BY expiry_date ASC, (CASE WHEN blood_group = ? THEN 0 ELSE 1 END) ASC, created_at ASC
             LIMIT ?
             """
-            params = [today_str, component] + compatible_groups + [remaining_needed]
+            params = [today_str, component] + compatible_groups + [patient_group, remaining_needed]
             available_rows = db.execute(sql, params).fetchall()
 
             if len(available_rows) < remaining_needed:
@@ -136,7 +164,7 @@ def allocate_units_fefo(
         # Atomically reserve each chosen unit
         allocated_ids = []
         for uid in chosen_units:
-            alloc_id = generate_allocation_id()
+            alloc_id = generate_allocation_id(db=db)
             db.execute(
                 """
                 INSERT INTO allocations (allocation_id, request_id, unit_id, allocated_by, status)
@@ -144,10 +172,14 @@ def allocate_units_fefo(
                 """,
                 (alloc_id, request_id, uid, actor_username)
             )
-            db.execute(
-                "UPDATE blood_units SET status = 'Reserved', updated_at = CURRENT_TIMESTAMP WHERE unit_id = ?",
+            # Concurrency-safe atomic status update
+            cur = db.execute(
+                "UPDATE blood_units SET status = 'Reserved', updated_at = CURRENT_TIMESTAMP WHERE unit_id = ? AND status = 'Available'",
                 (uid,)
             )
+            if cur.rowcount == 0:
+                return False, f"Unit {uid} was concurrently allocated or updated by another user.", []
+
             db.execute(
                 """
                 INSERT INTO unit_status_logs (unit_id, previous_status, new_status, reason, changed_by)
