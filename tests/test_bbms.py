@@ -1695,3 +1695,202 @@ def test_bbms_f_012_manual_allocation_validation_guards():
     ok_qty, err_qty, _ = allocate_units_fefo(req_id, selected_unit_ids=["UNIT-2026-00001"])
     assert ok_qty is False
     assert "match remaining required quantity" in err_qty.lower()
+
+
+# ==================== BBMS-F-015: ACID TRANSACTION HANDLING TESTS ====================
+
+def test_bbms_f_015_multi_unit_issue_acid_atomicity():
+    """BBMS-F-015: Issuing multi-unit request generates distinct IDs and commits atomically."""
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+    from app.services.request_service import create_blood_request, record_request_decision
+    from app.services.allocation_service import allocate_units_fefo
+    from app.services.issue_service import issue_blood_units_for_request
+    from app.database import get_db
+
+    # 1. Create donor and two blood units
+    donor_id = register_donor("Multi Unit Acid Donor", 32, "Male", "A+", "+91-9876501234")
+    evaluate_and_record_eligibility(
+        donor_id=donor_id,
+        weight_kg=72.0,
+        hemoglobin_g_dl=14.5,
+        systolic_bp=120,
+        diastolic_bp=80,
+        pulse=72,
+        days_since_last_donation=95
+    )
+    ok1, _, u1 = record_collection_and_create_unit(donor_id, "A+", 450.0, "Whole Blood")
+    ok2, _, u2 = record_collection_and_create_unit(donor_id, "A+", 450.0, "Whole Blood")
+    assert ok1 and ok2
+
+    # 2. Create and approve request for 2 units
+    _, _, req_id = create_blood_request(
+        hospital_name="Apollo Hospital",
+        requester_name="Dr. Mehta",
+        patient_name="Sita Ram",
+        patient_blood_group="A+",
+        component_type="Whole Blood",
+        quantity=2,
+        urgency="Normal"
+    )
+    record_request_decision(req_id, "Approved", "Pre-op reservation")
+
+    # 3. Allocate 2 units
+    alloc_ok, alloc_err, alloc_ids = allocate_units_fefo(req_id, selected_unit_ids=[u1["unit_id"], u2["unit_id"]])
+    assert alloc_ok is True, f"Allocation failed: {alloc_err}"
+    assert len(alloc_ids) == 2
+
+    # 4. Issue the blood units
+    issue_ok, issue_err, issued = issue_blood_units_for_request(req_id)
+    assert issue_ok is True, f"Issue failed: {issue_err}"
+    assert len(issued) == 2
+
+    # Verify both issued records received distinct, sequential issue IDs
+    issue_ids = [rec["issue_id"] for rec in issued]
+    assert len(set(issue_ids)) == 2, f"Duplicate issue IDs detected: {issue_ids}"
+    assert all(iid.startswith("ISS-") for iid in issue_ids)
+
+    # Verify DB state: units Issued, allocations Issued, request Fulfilled
+    with get_db() as db:
+        unit_rows = db.execute("SELECT unit_id, status FROM blood_units WHERE unit_id IN (?, ?)", (u1["unit_id"], u2["unit_id"])).fetchall()
+        for ur in unit_rows:
+            assert ur["status"] == "Issued"
+
+        alloc_rows = db.execute("SELECT allocation_id, status FROM allocations WHERE request_id = ?", (req_id,)).fetchall()
+        for ar in alloc_rows:
+            assert ar["status"] == "Issued"
+
+        req_row = db.execute("SELECT status FROM blood_requests WHERE request_id = ?", (req_id,)).fetchone()
+        assert req_row["status"] == "Fulfilled"
+
+
+def test_bbms_f_015_issue_failure_atomic_rollback():
+    """BBMS-F-015: If any unit in a multi-unit issue fails verification, entire transaction rolls back."""
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+    from app.services.request_service import create_blood_request, record_request_decision
+    from app.services.allocation_service import allocate_units_fefo
+    from app.services.issue_service import issue_blood_units_for_request
+    from app.database import get_db
+
+    # 1. Create donor and two units
+    donor_id = register_donor("Rollback Test Donor", 28, "Female", "B+", "+91-9876505678")
+    evaluate_and_record_eligibility(
+        donor_id=donor_id,
+        weight_kg=60.0,
+        hemoglobin_g_dl=13.5,
+        systolic_bp=115,
+        diastolic_bp=75,
+        pulse=70,
+        days_since_last_donation=110
+    )
+    ok1, _, u1 = record_collection_and_create_unit(donor_id, "B+", 450.0, "Packed Red Cells")
+    ok2, _, u2 = record_collection_and_create_unit(donor_id, "B+", 450.0, "Packed Red Cells")
+    assert ok1 and ok2
+
+    # 2. Create and approve request for 2 units
+    _, _, req_id = create_blood_request(
+        hospital_name="Fortis Hospital",
+        requester_name="Dr. Nambiar",
+        patient_name="Anil Kumar",
+        patient_blood_group="B+",
+        component_type="Packed Red Cells",
+        quantity=2,
+        urgency="Emergency"
+    )
+    record_request_decision(req_id, "Approved", "Emergency crossmatch approved")
+
+    # 3. Allocate both units
+    alloc_ok, _, _ = allocate_units_fefo(req_id, selected_unit_ids=[u1["unit_id"], u2["unit_id"]])
+    assert alloc_ok is True
+
+    # 4. Sabotage unit 2 by marking it Quarantined out-of-band before issuing
+    with get_db() as db:
+        db.execute("UPDATE blood_units SET status = 'Quarantined' WHERE unit_id = ?", (u2["unit_id"],))
+
+    # 5. Attempt issue - must fail due to safety policy on unit 2
+    issue_ok, issue_err, issued = issue_blood_units_for_request(req_id)
+    assert issue_ok is False
+    assert "quarantined" in issue_err.lower()
+    assert len(issued) == 0
+
+    # 6. Verify ATOMIC ROLLBACK: unit 1 must NOT be 'Issued' (remains Reserved)
+    with get_db() as db:
+        u1_row = db.execute("SELECT status FROM blood_units WHERE unit_id = ?", (u1["unit_id"],)).fetchone()
+        assert u1_row["status"] == "Reserved", f"Unit 1 should have remained Reserved, got {u1_row['status']}"
+
+        # No issue transactions should have been inserted for this request
+        issue_count = db.execute("SELECT COUNT(*) as c FROM issue_transactions WHERE request_id = ?", (req_id,)).fetchone()["c"]
+        assert issue_count == 0
+
+        # Allocations should NOT be marked Issued
+        alloc_issued = db.execute("SELECT COUNT(*) as c FROM allocations WHERE request_id = ? AND status = 'Issued'", (req_id,)).fetchone()["c"]
+        assert alloc_issued == 0
+
+        # Request status should still be Approved, NOT Fulfilled
+        req_status = db.execute("SELECT status FROM blood_requests WHERE request_id = ?", (req_id,)).fetchone()["status"]
+        assert req_status == "Approved"
+
+
+def test_bbms_f_015_concurrent_double_issue_prevention():
+    """BBMS-F-015: Concurrent attempts to issue the same allocated unit strictly prevent double-issue."""
+    import concurrent.futures
+    from app.services.inventory_service import record_collection_and_create_unit
+    from app.services.donor_service import register_donor, evaluate_and_record_eligibility
+    from app.services.request_service import create_blood_request, record_request_decision
+    from app.services.allocation_service import allocate_units_fefo
+    from app.services.issue_service import issue_blood_units_for_request
+    from app.database import get_db
+
+    # 1. Setup donor, unit, request, and allocation
+    donor_id = register_donor("Concurrency Issue Donor", 35, "Male", "O-", "+91-9876509999")
+    evaluate_and_record_eligibility(
+        donor_id=donor_id,
+        weight_kg=78.0,
+        hemoglobin_g_dl=15.2,
+        systolic_bp=120,
+        diastolic_bp=80,
+        pulse=75,
+        days_since_last_donation=100
+    )
+    ok, _, unit = record_collection_and_create_unit(donor_id, "O-", 450.0, "Packed Red Cells")
+    assert ok
+
+    _, _, req_id = create_blood_request(
+        hospital_name="Narayana Health",
+        requester_name="Dr. Patil",
+        patient_name="Ramesh Babu",
+        patient_blood_group="O-",
+        component_type="Packed Red Cells",
+        quantity=1,
+        urgency="Urgent"
+    )
+    record_request_decision(req_id, "Approved", "Pre-op preparation")
+    alloc_ok, _, _ = allocate_units_fefo(req_id, selected_unit_ids=[unit["unit_id"]])
+    assert alloc_ok
+
+    # 2. Launch concurrent issue requests across 4 worker threads
+    def do_issue(worker_idx):
+        return issue_blood_units_for_request(
+            request_id=req_id,
+            actor_username=f"staff_worker_{worker_idx}"
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(do_issue, i) for i in range(4)]
+        results = [f.result() for f in futures]
+
+    # Exactly one thread must have succeeded
+    successful_issues = [r for r in results if r[0] is True]
+    rejected_issues = [r for r in results if r[0] is False]
+
+    assert len(successful_issues) == 1, f"Expected exactly 1 successful issue, got {len(successful_issues)}. Results: {results}"
+    assert len(rejected_issues) == 3
+
+    # Database integrity check: exactly one issue record exists for this unit
+    with get_db() as db:
+        issue_rows = db.execute("SELECT * FROM issue_transactions WHERE unit_id = ?", (unit["unit_id"],)).fetchall()
+        assert len(issue_rows) == 1, f"Expected 1 issue transaction in DB, found {len(issue_rows)}"
+
+        unit_status = db.execute("SELECT status FROM blood_units WHERE unit_id = ?", (unit["unit_id"],)).fetchone()["status"]
+        assert unit_status == "Issued"
