@@ -1,16 +1,39 @@
 # BBMS-F-016: Blood Request Search & Filtering - Assigned to Nandan Kumar K R
 # BBMS-F-011: Request Approval Workflow with Rationale - Assigned to Nandan Kumar K R
 # BBMS-F-010: Request Validation - Assigned to Mueez Ahmed
+import sqlite3
+import time
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any, Tuple
 from app.database import get_db
 from app.config import BLOOD_GROUPS, COMPONENT_TYPES
 
-def generate_request_id() -> str:
+def generate_request_id(db=None) -> str:
+    """Generate sequential unique blood request ID: REQ-YYYY-NNNN (BBMS-F-009, BBMS-NF-001)."""
     year = datetime.utcnow().year
-    with get_db() as db:
-        count = db.execute("SELECT COUNT(*) as c FROM blood_requests WHERE request_id LIKE ?", (f"REQ-{year}-%",)).fetchone()["c"]
-        return f"REQ-{year}-{count + 1:04d}"
+    if db is not None:
+        rows = db.execute(
+            "SELECT request_id FROM blood_requests WHERE request_id LIKE ? ORDER BY request_id DESC",
+            (f"REQ-{year}-%",)
+        ).fetchall()
+        max_num = 0
+        for r in rows:
+            try:
+                num = int(r["request_id"].split("-")[-1])
+                if num > max_num:
+                    max_num = num
+            except (ValueError, IndexError):
+                pass
+        if max_num == 0:
+            count = db.execute(
+                "SELECT COUNT(*) as c FROM blood_requests WHERE request_id LIKE ?",
+                (f"REQ-{year}-%",)
+            ).fetchone()["c"]
+            max_num = count
+        return f"REQ-{year}-{max_num + 1:04d}"
+
+    with get_db() as db_conn:
+        return generate_request_id(db=db_conn)
 
 def create_blood_request(
     hospital_name: str,
@@ -22,11 +45,13 @@ def create_blood_request(
     urgency: str = "Normal",
     required_date: Optional[date] = None,
     actor_username: str = "hospital",
-    ip_address: str = "127.0.0.1"
+    ip_address: str = "127.0.0.1",
+    max_retries: int = 15
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Validate and create a hospital blood request (BBMS-F-009, BBMS-F-010).
     Enforces field validation and rejects invalid requests.
+    Thread-safe with collision retries and atomic locking for concurrent write performance (BBMS-NF-001).
     """
     if patient_blood_group not in BLOOD_GROUPS:
         return False, f"Invalid blood group: {patient_blood_group}", None
@@ -40,43 +65,69 @@ def create_blood_request(
     if required_date is None:
         required_date = date.today()
 
-    request_id = generate_request_id()
+    for attempt in range(max_retries):
+        try:
+            with get_db(immediate=True) as db:
+                request_id = generate_request_id(db=db)
 
-    with get_db() as db:
-        db.execute(
-            """
-            INSERT INTO blood_requests (
-                request_id, hospital_name, requester_name, patient_name,
-                patient_blood_group, component_type, quantity, urgency,
-                required_date, status
+                db.execute(
+                    """
+                    INSERT INTO blood_requests (
+                        request_id, hospital_name, requester_name, patient_name,
+                        patient_blood_group, component_type, quantity, urgency,
+                        required_date, status
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')
+                    """,
+                    (request_id, hospital_name, requester_name, patient_name,
+                     patient_blood_group, component_type, quantity, urgency, required_date.isoformat())
+                )
+
+                # Trigger high-priority alert if urgent or emergency
+                if urgency in ("Urgent", "Emergency"):
+                    severity = "Critical" if urgency == "Emergency" else "Warning"
+                    db.execute(
+                        """
+                        INSERT INTO inventory_alerts (alert_type, severity, message)
+                        VALUES ('Urgent_Request', ?, ?)
+                        """,
+                        (severity, f"{urgency.upper()} BLOOD REQUEST: {request_id} for {quantity} unit(s) of {patient_blood_group} {component_type} from {hospital_name} (Patient: {patient_name}).")
+                    )
+
+                # Audit log
+                db.execute(
+                    """
+                    INSERT INTO audit_logs (actor_username, actor_role, action, entity_type, entity_id, details, ip_address)
+                    VALUES (?, 'hospital', 'CREATE_BLOOD_REQUEST', 'BLOOD_REQUEST', ?, ?, ?)
+                    """,
+                    (actor_username, request_id, f"Created {urgency} request {request_id} for {quantity} unit(s) of {patient_blood_group} {component_type}", ip_address)
+                )
+
+                return True, None, request_id
+
+        except sqlite3.IntegrityError as e:
+            err_msg = str(e).lower()
+            # Only retry if the failure is specifically a request_id primary key collision
+            is_request_id_collision = (
+                "blood_requests.request_id" in err_msg
+                or ("request_id" in err_msg and ("unique" in err_msg or "primary key" in err_msg))
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')
-            """,
-            (request_id, hospital_name, requester_name, patient_name,
-             patient_blood_group, component_type, quantity, urgency, required_date.isoformat())
-        )
+            if is_request_id_collision:
+                if attempt < max_retries - 1:
+                    time.sleep(0.01 * (attempt + 1))
+                    continue
+                return False, f"Failed to allocate unique request ID after {max_retries} attempts: {e}", None
+            return False, f"Database integrity error: {e}", None
 
-        # Trigger high-priority alert if urgent or emergency
-        if urgency in ("Urgent", "Emergency"):
-            severity = "Critical" if urgency == "Emergency" else "Warning"
-            db.execute(
-                """
-                INSERT INTO inventory_alerts (alert_type, severity, message)
-                VALUES ('Urgent_Request', ?, ?)
-                """,
-                (severity, f"{urgency.upper()} BLOOD REQUEST: {request_id} for {quantity} unit(s) of {patient_blood_group} {component_type} from {hospital_name} (Patient: {patient_name}).")
-            )
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                if attempt < max_retries - 1:
+                    time.sleep(0.02 * (attempt + 1))
+                    continue
+                return False, "Database busy during request creation. Please retry.", None
+            raise
 
-        # Audit log
-        db.execute(
-            """
-            INSERT INTO audit_logs (actor_username, actor_role, action, entity_type, entity_id, details, ip_address)
-            VALUES (?, 'hospital', 'CREATE_BLOOD_REQUEST', 'BLOOD_REQUEST', ?, ?, ?)
-            """,
-            (actor_username, request_id, f"Created {urgency} request {request_id} for {quantity} unit(s) of {patient_blood_group} {component_type}", ip_address)
-        )
-
-    return True, None, request_id
+    return False, "Failed to allocate unique request ID after multiple attempts.", None
 
 def record_request_decision(
     request_id: str,
