@@ -111,11 +111,11 @@ python run.py
 - Interactive Swagger UI: **http://localhost:8000/docs**
 
 ### 2. Run the Automated Test Suite
-To verify all 20 SRS acceptance tests:
+To verify all 66 tests in `tests/test_bbms.py`:
 ```bash
 python -m pytest tests/test_bbms.py -v
 ```
-All 20 tests will execute and pass, verifying full compliance.
+All 66 tests will execute and pass, verifying full compliance.
 
 To verify the full regression test suite (76 automated tests: 66 in `tests/test_bbms.py` and 10 in `tests/test_performance.py` covering functional, security, RBAC, ACID, and performance requirements):
 ```bash
