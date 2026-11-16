@@ -34,10 +34,11 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Run automated tests
+      - name: Run complete test suite
         run: |
-          python -m pytest tests/test_bbms.py -v
+          python -m pytest tests/ -v
 
       - name: Compile Python files
         run: |
           python -m compileall -q app
+
