@@ -46,12 +46,16 @@ def create_blood_request(
     required_date: Optional[date] = None,
     actor_username: str = "hospital",
     ip_address: str = "127.0.0.1",
-    max_retries: int = 15
+    max_retries: int = 15,
+    max_timeout: float = 1.5
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Validate and create a hospital blood request (BBMS-F-009, BBMS-F-010).
     Enforces field validation and rejects invalid requests.
     Thread-safe with collision retries and atomic locking for concurrent write performance (BBMS-NF-001).
+    Database lock and retry waiting is bounded by max_timeout (default 1.5s), ensuring SQLite contention
+    does not block indefinitely. Note: this bounds database lock/retry waiting specifically;
+    it does not claim to guarantee every possible end-to-end HTTP request completes under arbitrary external load.
     """
     if patient_blood_group not in BLOOD_GROUPS:
         return False, f"Invalid blood group: {patient_blood_group}", None
@@ -65,9 +69,17 @@ def create_blood_request(
     if required_date is None:
         required_date = date.today()
 
+    start_time = time.monotonic()
+    deadline = start_time + max_timeout
+
     for attempt in range(max_retries):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False, "Database busy during request creation. Please retry.", None
+
+        attempt_timeout = min(remaining, 0.2)
         try:
-            with get_db(immediate=True) as db:
+            with get_db(immediate=True, timeout=attempt_timeout) as db:
                 request_id = generate_request_id(db=db)
 
                 db.execute(
@@ -113,21 +125,33 @@ def create_blood_request(
                 or ("request_id" in err_msg and ("unique" in err_msg or "primary key" in err_msg))
             )
             if is_request_id_collision:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False, "Database busy during request creation. Please retry.", None
                 if attempt < max_retries - 1:
-                    time.sleep(0.01 * (attempt + 1))
+                    sleep_time = min(0.01 * (attempt + 1), remaining)
+                    time.sleep(sleep_time)
+                    if deadline - time.monotonic() <= 0:
+                        return False, "Database busy during request creation. Please retry.", None
                     continue
                 return False, f"Failed to allocate unique request ID after {max_retries} attempts: {e}", None
             return False, f"Database integrity error: {e}", None
 
         except sqlite3.OperationalError as e:
             if "locked" in str(e).lower() or "busy" in str(e).lower():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False, "Database busy during request creation. Please retry.", None
                 if attempt < max_retries - 1:
-                    time.sleep(0.02 * (attempt + 1))
+                    sleep_time = min(0.02 * (attempt + 1), remaining)
+                    time.sleep(sleep_time)
+                    if deadline - time.monotonic() <= 0:
+                        return False, "Database busy during request creation. Please retry.", None
                     continue
                 return False, "Database busy during request creation. Please retry.", None
             raise
 
-    return False, "Failed to allocate unique request ID after multiple attempts.", None
+    return False, "Database busy during request creation. Please retry.", None
 
 def record_request_decision(
     request_id: str,

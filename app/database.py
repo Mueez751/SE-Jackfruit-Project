@@ -196,17 +196,18 @@ def init_db():
     conn.close()
 
 @contextmanager
-def get_db(immediate: bool = False):
-    conn = sqlite3.connect(DB_PATH, timeout=20.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON;")
-    if immediate:
-        conn.execute("BEGIN IMMEDIATE;")
+def get_db(immediate: bool = False, timeout: float = 20.0):
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON;")
+        if immediate:
+            conn.execute("BEGIN IMMEDIATE;")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     finally:
         conn.close()

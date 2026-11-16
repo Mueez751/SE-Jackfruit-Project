@@ -117,7 +117,7 @@ python -m pytest tests/test_bbms.py -v
 ```
 All 66 tests will execute and pass, verifying full compliance.
 
-To verify the full regression test suite (76 automated tests: 66 in `tests/test_bbms.py` and 10 in `tests/test_performance.py` covering functional, security, RBAC, ACID, and performance requirements):
+To verify the full regression test suite (77 automated tests: 66 in `tests/test_bbms.py` and 11 in `tests/test_performance.py` covering functional, security, RBAC, ACID, and performance requirements):
 ```bash
 python -m pytest tests/ -v
 ```
@@ -147,7 +147,7 @@ In comprehensive empirical benchmarking (24 distinct workload profiles, 960 tota
 ### Architectural Latency Characteristics (< 0.05s Reads vs. Security PBKDF2)
 - **High-Speed Cached Reads (< 0.05 s / < 50 ms):** Standard search, filter, and dashboard endpoints (such as `GET /api/inventory/summary`, `GET /api/donors?search=...`, and `GET /api/requests?urgency=...`) consistently execute in **0.007s – 0.043s** under both in-process ASGI and live TCP loopback socket environments. O(1) in-memory session token validation (`GET /api/auth/me`) resolves in ~0.008s–0.009s.
 - **Deliberate Cryptographic Defense (~0.12s):** Credential verification (`POST /api/auth/login`) utilizes 100,000 rounds of salted PBKDF2-HMAC-SHA256 (mandated by `BBMS-SR-003` to thwart offline brute-force and dictionary attacks). This deliberate computational cost takes ~0.127s (strictly sub-second and far below the 3.0s SLA), while all subsequent authenticated queries operate at sub-50ms speeds via cached bearer tokens.
-- **ACID Transaction Locking Under Contention:** Concurrent request creation (`POST /api/requests`) with SQLite WAL mode and immediate locking handles high concurrency (C=5, C=10) with 0 errors and a worst-case p95 of 0.4875s (max: 0.6397s).
+- **ACID Transaction Locking Under Contention & Bounded Retries:** Concurrent request creation (`POST /api/requests`) utilizes SQLite WAL mode with immediate locking. To prevent unbounded latency under sustained database contention, request creation enforces a bounded database lock/retry waiting deadline of 1.5s (with per-attempt lock waits capped at ≤ 0.2s); this provides an explicit internal bound on database contention waiting (not a universal end-to-end guarantee for arbitrary external client networks). Under empirical concurrency benchmarks (C=5, C=10), requests resolve with 0 errors and a worst-case p95 of 0.4875s (max: 0.6397s).
 
 ### System & Environment Configuration
 - **Operating System:** Windows 11 (10.0.26300)
@@ -237,7 +237,7 @@ BloodBankManagementSystem/
 ├── tests/
 │   ├── perf_runner.py            # Reusable benchmarking runner (24 scenarios, metrics & reporting)
 │   ├── test_bbms.py              # 66 automated pytest test cases (functional, security, RBAC, ACID)
-│   └── test_performance.py       # 10 automated performance SLA & middleware tests
+│   └── test_performance.py       # 11 automated performance SLA & middleware tests
 ├── requirements.txt
 ├── run.py                        # Server runner
 └── README.md                     # Documentation

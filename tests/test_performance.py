@@ -555,3 +555,99 @@ def test_unrelated_unique_constraint_failure_not_retried():
             db.execute("DELETE FROM blood_requests WHERE patient_name = ?;", (test_patient,))
 
 
+# ==================== 10. SUSTAINED DATABASE LOCK CONTENTION TEST ====================
+
+def test_sustained_db_lock_bounded_retry_failure():
+    """
+    Verify that sustained SQLite database lock contention causes create_blood_request()
+    to fail gracefully within the bounded deadline (<2.5s) instead of hanging for
+    the 20s SQLite timeout. Also confirms transaction atomicity (no partial inserts)
+    and that database returns to normal operation after lock release.
+    """
+    import time
+    import threading
+    import sqlite3
+    from app.config import DB_PATH
+    from app.database import get_db
+    from app.services.request_service import create_blood_request
+
+    lock_acquired_event = threading.Event()
+    stop_lock_event = threading.Event()
+    lock_thread_error = []
+    unique_patient = f"Patient_Lock_Contention_{time.time()}"
+
+    def lock_holder():
+        conn = None
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=10.0)
+            conn.execute("BEGIN IMMEDIATE;")
+            lock_acquired_event.set()
+            # Hold lock for up to 4.0 seconds or until explicitly signalled to release
+            stop_lock_event.wait(timeout=4.0)
+        except Exception as exc:
+            lock_thread_error.append(exc)
+            lock_acquired_event.set()
+        finally:
+            if conn:
+                try:
+                    conn.rollback()
+                    conn.close()
+                except Exception:
+                    pass
+
+    holder_thread = threading.Thread(target=lock_holder, daemon=True)
+    holder_thread.start()
+
+    # Begin the protected try/finally block immediately after starting the thread
+    try:
+        # Event waiting and acquisition assertions inside protected block
+        acquired = lock_acquired_event.wait(timeout=5.0)
+        assert acquired, "Background thread failed to acquire initial lock within 5.0s"
+        assert not lock_thread_error, f"Lock holder thread encountered error: {lock_thread_error}"
+
+        start_time = time.perf_counter()
+        ok, err, req_id = create_blood_request(
+            hospital_name="Lock Contention General",
+            requester_name="Dr. TestLock",
+            patient_name=unique_patient,
+            patient_blood_group="A+",
+            component_type="Whole Blood",
+            quantity=1
+        )
+        elapsed = time.perf_counter() - start_time
+
+        # 1. Verify bounded duration: must fail gracefully comfortably within 2.5s (< 3.0s SLA)
+        assert elapsed < 2.5, f"Request creation took {elapsed:.4f}s, exceeding 2.5s bounded retry deadline"
+        assert elapsed >= 1.0, f"Request creation failed too quickly ({elapsed:.4f}s); expected retries up to deadline"
+
+        # 2. Verify graceful database-busy failure
+        assert ok is False, "Expected create_blood_request to fail under active lock"
+        assert req_id is None, f"Expected None request_id under active lock, got {req_id}"
+        assert err == "Database busy during request creation. Please retry.", f"Unexpected error message: {err}"
+
+        # 3. Verify transaction atomicity: confirm no request was partially inserted
+        with get_db() as db:
+            row = db.execute("SELECT * FROM blood_requests WHERE patient_name = ?", (unique_patient,)).fetchone()
+            assert row is None, "Found partially inserted blood request despite lock failure"
+
+    finally:
+        # In every execution path, signal the holder thread to release and join
+        stop_lock_event.set()
+        holder_thread.join(timeout=6.0)
+        # Explicitly assert that the holder thread has terminated
+        assert not holder_thread.is_alive(), "Lock holder thread failed to terminate after stop signal"
+
+        # Clean up any potential records for this patient
+        try:
+            with get_db() as db:
+                db.execute("DELETE FROM blood_requests WHERE patient_name = ?", (unique_patient,))
+        except Exception:
+            pass
+
+    # 4. Verify database accepts normal queries after lock release
+    with get_db() as db:
+        check_row = db.execute("SELECT 1 as alive;").fetchone()
+        assert check_row["alive"] == 1
+
+
+
