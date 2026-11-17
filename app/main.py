@@ -63,6 +63,10 @@ app.include_router(demo.router)
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+HTMLCOV_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "htmlcov")
+if os.path.exists(HTMLCOV_DIR):
+    app.mount("/coverage", StaticFiles(directory=HTMLCOV_DIR, html=True), name="coverage")
+
 @app.get("/", include_in_schema=False)
 async def serve_index():
     index_file = os.path.join(STATIC_DIR, "index.html")

@@ -12,3 +12,7 @@ venv/
 
 # Environment variables
 .env
+
+# Coverage raw data
+.coverage
+.coverage.*
