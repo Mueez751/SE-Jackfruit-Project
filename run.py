@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 if __name__ == "__main__":
+    os.environ.setdefault("BBMS_ENABLE_DEMO", "true")
     print("=" * 70)
     print("  BLOOD BANK MANAGEMENT SYSTEM (BBMS) - SWE PROJECT")
     print("  Student: N S LOKESH NAIDU | SRN: PES2UG24CS292 | Sec: 5E")
